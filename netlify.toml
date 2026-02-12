@@ -1,6 +1,6 @@
 [build]
   base = "flutter_app"
-  publish = "flutter_app/build/web"
+  publish = "build/web"
   command = """
     git clone https://github.com/flutter/flutter.git --branch stable --depth 1 $HOME/flutter && \
     export PATH="$HOME/flutter/bin:$PATH" && \
