@@ -276,14 +276,14 @@ async def generate_new_routine(request: RoutineGenerationRequest):
     # Determine start date
     if request.start_date:
         try:
-            base = datetime.datetime.strptime(request.start_date, '%Y-%m-%d')
+            base = pd.Timestamp(datetime.datetime.strptime(request.start_date, '%Y-%m-%d')).normalize()
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid start date format. Use YYYY-MM-DD")
     else:
-        base = datetime.datetime.today()
+        base = pd.Timestamp(datetime.datetime.today()).normalize()
     
-    # Generate date list
-    date_list = np.array([base + datetime.timedelta(days=2*x) for x in range(NUM_FRAMES)])
+    # Generate date list (all dates normalized to midnight)
+    date_list = np.array([base + pd.Timedelta(days=2*x) for x in range(NUM_FRAMES)])
     
     # Generate schedule
     schedule = {'date': [], 'workout': [], 'score': [], 'units': [], 'at_park': []}
@@ -304,6 +304,7 @@ async def generate_new_routine(request: RoutineGenerationRequest):
     
     # Create DataFrame and sort by date
     schedule_df = pd.DataFrame(schedule)
+    schedule_df['date'] = pd.to_datetime(schedule_df['date']).dt.normalize()
     schedule_df = schedule_df.sort_values(by=['date'])
     
     # Save to pickle file
