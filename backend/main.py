@@ -69,8 +69,25 @@ workouts_df = None
 schedule_df = None
 
 def get_data_dir():
-    """Get the data directory - use /data if it exists (Render), otherwise ./data for local"""
-    data_dir = "/data" if os.path.exists("/data") else "./data"
+    """Get the data directory - check multiple possible locations"""
+    # Check for Render persistent disk locations (try both possible paths)
+    if os.path.exists("/backend/data"):
+        data_dir = "/backend/data"
+    elif os.path.exists("/data"):
+        data_dir = "/data"
+    else:
+        # Fall back to local development
+        data_dir = "./data"
+    
+    # On first run on Render, copy workouts.csv from repo if it doesn't exist
+    if data_dir in ["/data", "/backend/data"]:
+        source_workouts = "./data/workouts.csv" if os.path.exists("./data/workouts.csv") else "./workouts.csv"
+        dest_workouts = f"{data_dir}/workouts.csv"
+        if os.path.exists(source_workouts) and not os.path.exists(dest_workouts):
+            import shutil
+            shutil.copy(source_workouts, dest_workouts)
+            print(f"Initialized {dest_workouts} from {source_workouts}")
+    
     return data_dir
 
 def load_data():
