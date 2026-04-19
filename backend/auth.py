@@ -52,7 +52,8 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
 # Frontend URL for redirects after auth
-FRONTEND_URL = config.get('FRONTEND_URL', default='http://localhost:8080')
+# FRONTEND_URL = config.get('FRONTEND_URL', default='http://localhost:8080')
+FRONTEND_URL = config.get('FRONTEND_URL', default='https://mseq-workout.netlify.app/')
 
 # Router for auth endpoints
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -139,7 +140,8 @@ async def google_login(request: Request):
 
     # Use production backend URL for redirect URI
     # Change this to your deployed backend URL
-    redirect_uri = "https://your-backend.onrender.com/auth/google/callback"
+    # redirect_uri = "https://your-backend.onrender.com/auth/google/callback"
+    redirect_uri = "https://your-app.onrender.com/auth/google/callback"
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
