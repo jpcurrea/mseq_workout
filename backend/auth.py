@@ -141,7 +141,7 @@ async def google_login(request: Request):
     # Use production backend URL for redirect URI
     # Change this to your deployed backend URL
     # redirect_uri = "https://your-backend.onrender.com/auth/google/callback"
-    redirect_uri = "https://your-app.onrender.com/auth/google/callback"
+    redirect_uri = "https://workout-backend-h6pd.onrender.com/auth/google/callback"
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
