@@ -313,7 +313,7 @@ class _WorkoutManagementScreenState extends State<WorkoutManagementScreen> {
                 Expanded(
                   flex: 2,
                   child: DropdownButtonFormField<bool>(
-                    value: controllers.atPark,
+                    initialValue: controllers.atPark,
                     decoration: const InputDecoration(
                       labelText: 'Location',
                       border: OutlineInputBorder(),
@@ -460,7 +460,7 @@ class _AddWorkoutDialogState extends State<AddWorkoutDialog> {
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<bool>(
-              value: _atPark,
+              initialValue: _atPark,
               decoration: const InputDecoration(
                 labelText: 'Location',
                 border: OutlineInputBorder(),

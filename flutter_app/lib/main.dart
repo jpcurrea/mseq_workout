@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'screens/home_screen.dart';
 import 'screens/history_screen.dart';
+import 'screens/progress_screen.dart';
 import 'screens/workout_management_screen.dart';
+import 'screens/login_screen.dart';
+import 'services/auth_service.dart';
+import 'services/api_service.dart';
 
 void main() {
+  printTokenForExport(); // TEMP: Print JWT token for /export
   runApp(const WorkoutApp());
 }
 
@@ -15,15 +20,64 @@ class WorkoutApp extends StatelessWidget {
     return MaterialApp(
       title: 'Workout Routine',
       theme: ThemeData(
-        primarySwatch: Colors.blue,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF4A7FA5), // muted steel blue
+          brightness: Brightness.light,
+        ),
         useMaterial3: true,
       ),
-      home: const HomeScreen(),
+      home: const AuthGate(),
       routes: {
         '/home': (context) => const HomeScreen(),
         '/history': (context) => const HistoryScreen(),
+        '/progress': (context) => const ProgressScreen(),
         '/manage-workouts': (context) => const WorkoutManagementScreen(),
+        '/login': (context) => const LoginScreen(),
       },
+    );
+  }
+}
+
+/// Checks for a token on startup (including OAuth callback redirect),
+/// then routes to LoginScreen or HomeScreen accordingly.
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
+
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  @override
+  void initState() {
+    super.initState();
+    _initAuth();
+  }
+
+  Future<void> _initAuth() async {
+    // If the backend redirected back with ?token=..., capture and save it
+    final urlToken = AuthService.extractTokenFromUrl();
+    if (urlToken != null) {
+      await AuthService.saveToken(urlToken);
+    }
+
+    if (!mounted) return;
+
+    final loggedIn = await AuthService.isLoggedIn();
+    if (!mounted) return;
+
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => loggedIn ? const HomeScreen() : const LoginScreen(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Show a splash while checking auth state
+    return const Scaffold(
+      body: Center(child: CircularProgressIndicator()),
     );
   }
 }

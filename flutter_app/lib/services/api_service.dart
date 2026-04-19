@@ -1,18 +1,25 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/workout.dart';
+import 'auth_service.dart';
 
 class ApiService {
-  // Change this to your actual backend URL
-  // For local development: 'http://localhost:8000'
-  // For production: your deployed backend URL
   // static const String baseUrl = 'http://localhost:8000';
   static const String baseUrl = 'https://workout-backend-h6pd.onrender.com';
+
+  static Future<Map<String, String>> _headers() async {
+    final token = await AuthService.getToken();
+    return {
+      'Content-Type': 'application/json',
+      if (token != null) 'Authorization': 'Bearer $token',
+    };
+  }
+
   static Future<List<Workout>> getWorkouts() async {
     try {
       final response = await http.get(
         Uri.parse('$baseUrl/workouts'),
-        headers: {'Content-Type': 'application/json'},
+        headers: await _headers(),
       );
 
       if (response.statusCode == 200) {
@@ -30,7 +37,7 @@ class ApiService {
     try {
       final response = await http.get(
         Uri.parse('$baseUrl/today'),
-        headers: {'Content-Type': 'application/json'},
+        headers: await _headers(),
       );
 
       if (response.statusCode == 200) {
@@ -48,7 +55,7 @@ class ApiService {
     try {
       final response = await http.get(
         Uri.parse('$baseUrl/schedule/$date'),
-        headers: {'Content-Type': 'application/json'},
+        headers: await _headers(),
       );
 
       if (response.statusCode == 200) {
@@ -66,7 +73,7 @@ class ApiService {
     try {
       final response = await http.post(
         Uri.parse('$baseUrl/update-score'),
-        headers: {'Content-Type': 'application/json'},
+        headers: await _headers(),
         body: json.encode({
           'workout': workout,
           'date': date,
@@ -89,7 +96,7 @@ class ApiService {
     try {
       final response = await http.post(
         Uri.parse('$baseUrl/generate-routine'),
-        headers: {'Content-Type': 'application/json'},
+        headers: await _headers(),
         body: json.encode({
           if (startDate != null) 'start_date': startDate,
           if (sequencePower != null) 'sequence_power': sequencePower,
@@ -110,7 +117,7 @@ class ApiService {
     try {
       final response = await http.post(
         Uri.parse('$baseUrl/workouts'),
-        headers: {'Content-Type': 'application/json'},
+        headers: await _headers(),
         body: json.encode({
           'name': workout.name,
           'goal': workout.goal,
@@ -132,7 +139,7 @@ class ApiService {
     try {
       final response = await http.put(
         Uri.parse('$baseUrl/workouts/$workoutName'),
-        headers: {'Content-Type': 'application/json'},
+        headers: await _headers(),
         body: json.encode({
           'goal': goal,
           'units': units,
@@ -152,7 +159,7 @@ class ApiService {
     try {
       final response = await http.delete(
         Uri.parse('$baseUrl/workouts/$workoutName'),
-        headers: {'Content-Type': 'application/json'},
+        headers: await _headers(),
       );
 
       if (response.statusCode != 200) {
@@ -162,4 +169,39 @@ class ApiService {
       throw Exception('Network error: $e');
     }
   }
+
+  static Future<List<String>> getWorkoutNames() async {
+    final workouts = await getWorkouts();
+    return workouts.map((w) => w.name).toList();
+  }
+
+  static Future<List<Map<String, dynamic>>> getWorkoutHistory(
+    String workoutName, {
+    int limit = 20,
+    String? since,
+  }) async {
+    try {
+      final encodedName = Uri.encodeComponent(workoutName);
+      final params = <String, String>{'limit': limit.toString()};
+      if (since != null) params['since'] = since;
+      final uri = Uri.parse('$baseUrl/workouts/$encodedName/history')
+          .replace(queryParameters: params);
+      final response = await http.get(uri, headers: await _headers());
+      if (response.statusCode == 200) {
+        final List<dynamic> list = json.decode(response.body);
+        return list.cast<Map<String, dynamic>>();
+      } else {
+        throw Exception('Failed to load history: ${response.statusCode}');
+      }
+    } catch (e) {
+      throw Exception('Network error: $e');
+    }
+  }
+}
+
+// TEMP: Print JWT token at startup for export
+void printTokenForExport() async {
+  final token = await AuthService.getToken();
+  print('JWT token for /export:');
+  print(token);
 }

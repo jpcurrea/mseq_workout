@@ -1,1 +1,32 @@
+# Python
 *.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environment
+.env
+.venv
+env/
+venv/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.pkl
+data/*.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
