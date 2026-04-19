@@ -130,13 +130,16 @@ def get_or_create_user_from_oauth(
         session.close()
 
 
+
 @router.get("/google/login")
 async def google_login(request: Request):
     """Initiate Google OAuth flow"""
     if not config.get('GOOGLE_CLIENT_ID', default=None):
         raise HTTPException(status_code=500, detail="Google OAuth not configured")
-    
-    redirect_uri = request.url_for('google_callback')
+
+    # Use production backend URL for redirect URI
+    # Change this to your deployed backend URL
+    redirect_uri = "https://your-backend.onrender.com/auth/google/callback"
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
