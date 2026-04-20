@@ -53,7 +53,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
 # Frontend URL for redirects after auth
 # FRONTEND_URL = config.get('FRONTEND_URL', default='http://localhost:8080')
-FRONTEND_URL = config.get('FRONTEND_URL', default='https://mseq-workout.netlify.app/')
+FRONTEND_URL = config.get('FRONTEND_URL', default='https://mseq-workout.netlify.app')
 
 # Router for auth endpoints
 router = APIRouter(prefix="/auth", tags=["authentication"])
