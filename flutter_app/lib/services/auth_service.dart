@@ -7,7 +7,7 @@ class AuthService {
   static const _storage = FlutterSecureStorage();
 
   // Must match FRONTEND_URL in backend .env
-  static const String backendUrl = 'http://localhost:8000';
+  static const String backendUrl = 'https://workout-backend-h6pd.onrender.com';
 
   static Future<String?> getToken() async {
     return _storage.read(key: _tokenKey);
