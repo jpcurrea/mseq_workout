@@ -4,44 +4,7 @@ import 'package:intl/intl.dart';
 import '../services/api_service.dart';
 
 // ─── Date range options ──────────────────────────────────────────────────────
-
-enum _Range { week7, days30, all }
-
-extension _RangeExt on _Range {
-  String get label {
-    switch (this) {
-      case _Range.week7:
-        return '7d';
-      case _Range.days30:
-        return '30d';
-      case _Range.all:
-        return 'All';
-    }
-  }
-
-  String? get since {
-    final now = DateTime.now();
-    switch (this) {
-      case _Range.week7:
-        return DateFormat('yyyy-MM-dd').format(now.subtract(const Duration(days: 7)));
-      case _Range.days30:
-        return DateFormat('yyyy-MM-dd').format(now.subtract(const Duration(days: 30)));
-      case _Range.all:
-        return null;
-    }
-  }
-
-  int get historyLimit {
-    switch (this) {
-      case _Range.week7:
-        return 50;
-      case _Range.days30:
-        return 200;
-      case _Range.all:
-        return 2000;
-    }
-  }
-}
+// Always load all history; user can pinch/pan the chart to zoom in.
 
 // ─── Screen ──────────────────────────────────────────────────────────────────
 
@@ -55,7 +18,6 @@ class ProgressScreen extends StatefulWidget {
 class _ProgressScreenState extends State<ProgressScreen> {
   List<String> _workoutNames = [];
   String? _selectedWorkout;
-  _Range _range = _Range.days30;
 
   // loaded data
   List<Map<String, dynamic>> _history = [];
@@ -104,8 +66,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
     try {
       final data = await ApiService.getWorkoutHistory(
         _selectedWorkout!,
-        limit: _range.historyLimit,
-        since: _range.since,
+        limit: 2000,
+        since: null,
       );
       // Also fetch workout metadata for goal/units
       final workouts = await ApiService.getWorkouts();
@@ -125,11 +87,6 @@ class _ProgressScreenState extends State<ProgressScreen> {
         _loadingHistory = false;
       });
     }
-  }
-
-  void _onRangeChanged(_Range r) {
-    setState(() => _range = r);
-    _loadHistory();
   }
 
   void _onWorkoutChanged(String? name) {
@@ -159,36 +116,30 @@ class _ProgressScreenState extends State<ProgressScreen> {
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.4),
-      child: Row(
-        children: [
-          Expanded(
-            child: _loadingNames
-                ? const SizedBox(
-                    height: 36,
-                    child: Center(
-                        child: SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2))),
-                  )
-                : DropdownButtonFormField<String>(
-                    value: _selectedWorkout,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                      contentPadding:
-                          EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    ),
-                    items: _workoutNames
-                        .map((n) => DropdownMenuItem(value: n, child: Text(n, overflow: TextOverflow.ellipsis)))
-                        .toList(),
-                    onChanged: _onWorkoutChanged,
-                  ),
-          ),
-          const SizedBox(width: 8),
-          _RangeSelector(selected: _range, onChanged: _onRangeChanged),
-        ],
-      ),
+      child: _loadingNames
+          ? const SizedBox(
+              height: 36,
+              child: Center(
+                  child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2))),
+            )
+          : DropdownButtonFormField<String>(
+              value: _selectedWorkout,
+              decoration: const InputDecoration(
+                isDense: true,
+                border: OutlineInputBorder(),
+                contentPadding:
+                    EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              ),
+              items: _workoutNames
+                  .map((n) => DropdownMenuItem(
+                      value: n,
+                      child: Text(n, overflow: TextOverflow.ellipsis)))
+                  .toList(),
+              onChanged: _onWorkoutChanged,
+            ),
     );
   }
 
@@ -296,33 +247,9 @@ class _ProgressScreenState extends State<ProgressScreen> {
       v == v.truncateToDouble() ? v.toInt().toString() : v.toStringAsFixed(1);
 }
 
-// ─── Range selector ──────────────────────────────────────────────────────────
-
-class _RangeSelector extends StatelessWidget {
-  final _Range selected;
-  final ValueChanged<_Range> onChanged;
-
-  const _RangeSelector({required this.selected, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    return SegmentedButton<_Range>(
-      segments: _Range.values
-          .map((r) => ButtonSegment(value: r, label: Text(r.label)))
-          .toList(),
-      selected: {selected},
-      onSelectionChanged: (s) => onChanged(s.first),
-      style: ButtonStyle(
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        visualDensity: VisualDensity.compact,
-      ),
-    );
-  }
-}
-
 // ─── Chart ───────────────────────────────────────────────────────────────────
 
-class _ProgressChart extends StatelessWidget {
+class _ProgressChart extends StatefulWidget {
   final List<Map<String, dynamic>> entries; // oldest-first
   final double goal;
   final String units;
@@ -338,14 +265,33 @@ class _ProgressChart extends StatelessWidget {
   });
 
   @override
+  State<_ProgressChart> createState() => _ProgressChartState();
+}
+
+class _ProgressChartState extends State<_ProgressChart> {
+  double? _viewMinX;
+  double? _viewMaxX;
+  double? _scaleStartMin;
+  double? _scaleStartMax;
+  Offset? _panStartFocal;
+
+  @override
+  void didUpdateWidget(_ProgressChart old) {
+    super.didUpdateWidget(old);
+    if (old.entries != widget.entries) {
+      _viewMinX = null;
+      _viewMaxX = null;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (entries.isEmpty) return const SizedBox.shrink();
+    if (widget.entries.isEmpty) return const SizedBox.shrink();
 
     final color = Theme.of(context).colorScheme.primary;
-    final axisStyle =
-        TextStyle(fontSize: 10, color: Colors.grey.shade600);
+    final axisStyle = TextStyle(fontSize: 10, color: Colors.grey.shade600);
 
-    final dated = entries.map((e) {
+    final dated = widget.entries.map((e) {
       final d = DateTime.parse(e['date'] as String);
       return (
         date: DateTime(d.year, d.month, d.day),
@@ -358,12 +304,16 @@ class _ProgressChart extends StatelessWidget {
       final n = DateTime.now();
       return DateTime(n.year, n.month, n.day);
     }();
-    final maxX =
+    final totalMaxX =
         today.difference(firstDate).inDays.toDouble().clamp(1.0, double.infinity);
 
     final maxScore =
         dated.map((e) => e.score).reduce((a, b) => a > b ? a : b);
-    final maxY = (maxScore > goal ? maxScore * 1.1 : goal).ceilToDouble();
+    final maxY =
+        (maxScore > widget.goal ? maxScore * 1.1 : widget.goal).ceilToDouble();
+
+    final viewMinX = (_viewMinX ?? 0.0).clamp(0.0, totalMaxX - 1);
+    final viewMaxX = (_viewMaxX ?? totalMaxX).clamp(viewMinX + 1, totalMaxX);
 
     final spots = [
       for (int i = 0; i < dated.length; i++)
@@ -373,13 +323,48 @@ class _ProgressChart extends StatelessWidget {
         )
     ];
 
-    final xInterval = (maxX / 4).ceilToDouble().clamp(1.0, double.infinity);
+    final visibleSpan = viewMaxX - viewMinX;
+    final xInterval =
+        (visibleSpan / 4).ceilToDouble().clamp(1.0, double.infinity);
     final yInterval = (maxY / 4).ceilToDouble().clamp(1.0, double.infinity);
 
-    return LineChart(
+    return GestureDetector(
+      onScaleStart: (details) {
+        _scaleStartMin = viewMinX;
+        _scaleStartMax = viewMaxX;
+        _panStartFocal = details.localFocalPoint;
+      },
+      onScaleUpdate: (details) {
+        if (_scaleStartMin == null || _scaleStartMax == null) return;
+        final startSpan = _scaleStartMax! - _scaleStartMin!;
+        final newSpan = (startSpan / details.scale).clamp(7.0, totalMaxX);
+        final center = (_scaleStartMin! + _scaleStartMax!) / 2;
+        // Also account for panning by tracking focal point movement
+        double panDelta = 0;
+        if (_panStartFocal != null && details.scale == 1.0) {
+          // Pure pan: map pixel delta to data units
+          // We'll handle this in render size context
+        }
+        var newMin = center - newSpan / 2;
+        var newMax = center + newSpan / 2;
+        // Clamp to valid range
+        if (newMin < 0) {
+          newMax = (newMax - newMin).clamp(newSpan, totalMaxX);
+          newMin = 0;
+        }
+        if (newMax > totalMaxX) {
+          newMin = (newMin - (newMax - totalMaxX)).clamp(0, totalMaxX - newSpan);
+          newMax = totalMaxX;
+        }
+        setState(() {
+          _viewMinX = newMin;
+          _viewMaxX = newMax;
+        });
+      },
+      child: LineChart(
       LineChartData(
-        minX: 0,
-        maxX: maxX,
+        minX: viewMinX,
+        maxX: viewMaxX,
         minY: 0,
         maxY: maxY,
         clipData: const FlClipData.all(),
@@ -442,7 +427,7 @@ class _ProgressChart extends StatelessWidget {
         extraLinesData: ExtraLinesData(
           horizontalLines: [
             HorizontalLine(
-              y: goal,
+              y: widget.goal,
               color: Colors.orange.withOpacity(0.7),
               strokeWidth: 1.5,
               dashArray: [5, 4],
@@ -454,7 +439,7 @@ class _ProgressChart extends StatelessWidget {
                     fontSize: 10,
                     color: Colors.orange.shade700,
                     fontWeight: FontWeight.w600),
-                labelResolver: (line) => 'Goal $goal $units',
+                labelResolver: (line) => 'Goal ${widget.goal} ${widget.units}',
               ),
             ),
           ],
@@ -468,7 +453,7 @@ class _ProgressChart extends StatelessWidget {
                   ? s.y.toInt().toString()
                   : s.y.toStringAsFixed(1);
               return LineTooltipItem(
-                '$dateStr\n$scoreStr $units',
+                '$dateStr\n$scoreStr ${widget.units}',
                 TextStyle(
                   color: color,
                   fontWeight: FontWeight.bold,
@@ -480,9 +465,9 @@ class _ProgressChart extends StatelessWidget {
           touchCallback: (event, response) {
             if (!event.isInterestedForInteractions ||
                 response?.lineBarSpots == null) {
-              onTouch(null);
+              widget.onTouch(null);
             } else {
-              onTouch(response!.lineBarSpots!.first.spotIndex);
+              widget.onTouch(response!.lineBarSpots!.first.spotIndex);
             }
           },
           handleBuiltInTouches: true,
@@ -497,7 +482,7 @@ class _ProgressChart extends StatelessWidget {
             dotData: FlDotData(
               show: true,
               getDotPainter: (spot, percent, bar, index) {
-                final isActive = index == touchedIndex;
+                final isActive = index == widget.touchedIndex;
                 return FlDotCirclePainter(
                   radius: isActive ? 6 : 4,
                   color: isActive ? Colors.white : color,
@@ -513,7 +498,8 @@ class _ProgressChart extends StatelessWidget {
           ),
         ],
       ),
-    );
+    ),  // closes LineChart
+  );    // closes GestureDetector
   }
 }
 

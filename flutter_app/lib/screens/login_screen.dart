@@ -11,10 +11,12 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   bool _isLoading = false;
+  bool _rememberMe = false;
 
   Future<void> _handleSignIn() async {
     setState(() => _isLoading = true);
     try {
+      await AuthService.setRememberMe(_rememberMe);
       await AuthService.signInWithGoogle();
     } catch (e) {
       if (mounted) {
@@ -72,6 +74,19 @@ class _LoginScreenState extends State<LoginScreen> {
                         textStyle: const TextStyle(fontSize: 16),
                       ),
                     ),
+              const SizedBox(height: 16),
+              if (!_isLoading)
+                CheckboxListTile(
+                  value: _rememberMe,
+                  onChanged: (v) => setState(() => _rememberMe = v ?? false),
+                  title: const Text('Stay signed in on this device'),
+                  subtitle: const Text(
+                    'Automatically re-signs you in when your session expires.',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  contentPadding: EdgeInsets.zero,
+                ),
             ],
           ),
         ),

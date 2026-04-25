@@ -64,6 +64,19 @@ class _AuthGateState extends State<AuthGate> {
     if (!mounted) return;
 
     final loggedIn = await AuthService.isLoggedIn();
+
+    if (!loggedIn) {
+      // Token is expired or missing — check remember me
+      final hasToken = (await AuthService.getToken()) != null;
+      final rememberMe = await AuthService.getRememberMe();
+      if (hasToken && rememberMe) {
+        // Auto-silently re-authenticate via Google (transparent if Google session active)
+        await AuthService.clearToken();
+        await AuthService.signInWithGoogle();
+        return; // page will reload after OAuth redirect
+      }
+    }
+
     if (!mounted) return;
 
     Navigator.of(context).pushReplacement(

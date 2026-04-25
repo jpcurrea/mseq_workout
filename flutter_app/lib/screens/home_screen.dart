@@ -3,6 +3,8 @@ import 'package:intl/intl.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../models/workout.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
+import 'login_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -81,7 +83,7 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         leading: PopupMenuButton<String>(
           icon: const Icon(Icons.menu),
-          onSelected: (String value) {
+          onSelected: (String value) async {
             switch (value) {
               case 'generate_routine':
                 _showGenerateRoutineDialog();
@@ -94,6 +96,15 @@ class _HomeScreenState extends State<HomeScreen> {
                 break;
               case 'refresh':
                 loadWorkouts();
+                break;
+              case 'logout':
+                await AuthService.logout();
+                if (context.mounted) {
+                  Navigator.of(context).pushAndRemoveUntil(
+                    MaterialPageRoute(builder: (_) => const LoginScreen()),
+                    (route) => false,
+                  );
+                }
                 break;
             }
           },
@@ -127,6 +138,15 @@ class _HomeScreenState extends State<HomeScreen> {
               child: ListTile(
                 leading: Icon(Icons.refresh),
                 title: Text('Refresh Workouts'),
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+            const PopupMenuDivider(),
+            const PopupMenuItem<String>(
+              value: 'logout',
+              child: ListTile(
+                leading: Icon(Icons.logout),
+                title: Text('Sign Out'),
                 contentPadding: EdgeInsets.zero,
               ),
             ),

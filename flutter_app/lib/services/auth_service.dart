@@ -1,13 +1,16 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class AuthService {
   static const String _tokenKey = 'auth_token';
+  static const String _rememberMeKey = 'remember_me';
   static const _storage = FlutterSecureStorage();
 
   // Must match FRONTEND_URL in backend .env
-  static const String backendUrl = 'https://workout-backend-h6pd.onrender.com';
+  static const String backendUrl = 'https://workout-backend-h6pd.onrender.com'; // production
+  // static const String backendUrl = 'http://localhost:8000'; // local dev
 
   static Future<String?> getToken() async {
     return _storage.read(key: _tokenKey);
@@ -21,9 +24,46 @@ class AuthService {
     await _storage.delete(key: _tokenKey);
   }
 
-  static Future<bool> isLoggedIn() async {
+  static Future<void> setRememberMe(bool value) async {
+    await _storage.write(key: _rememberMeKey, value: value.toString());
+  }
+
+  static Future<bool> getRememberMe() async {
+    final v = await _storage.read(key: _rememberMeKey);
+    return v == 'true';
+  }
+
+  /// Decodes a JWT and returns its payload map.
+  static Map<String, dynamic>? _decodeJwt(String token) {
+    try {
+      final parts = token.split('.');
+      if (parts.length != 3) return null;
+      final payload = base64Url.normalize(parts[1]);
+      final decoded = utf8.decode(base64Url.decode(payload));
+      return json.decode(decoded) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Returns true if the stored token is missing or expired.
+  static Future<bool> isTokenExpired() async {
     final token = await getToken();
-    return token != null && token.isNotEmpty;
+    if (token == null || token.isEmpty) return true;
+    final payload = _decodeJwt(token);
+    if (payload == null) return true;
+    final exp = payload['exp'] as int?;
+    if (exp == null) return true;
+    return DateTime.now()
+        .isAfter(DateTime.fromMillisecondsSinceEpoch(exp * 1000));
+  }
+
+  static Future<bool> isLoggedIn() async {
+    return !(await isTokenExpired());
+  }
+
+  static Future<void> logout() async {
+    await clearToken();
   }
 
   /// Opens the Google OAuth login URL.
