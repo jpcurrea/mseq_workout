@@ -10,6 +10,7 @@ class WorkoutHistoryPanel extends StatelessWidget {
   final String units;
   final double goal;
   final String? exerciseId;
+  final Widget? sidePanel;
 
   const WorkoutHistoryPanel({
     super.key,
@@ -17,6 +18,7 @@ class WorkoutHistoryPanel extends StatelessWidget {
     required this.units,
     required this.goal,
     this.exerciseId,
+    this.sidePanel,
   });
 
   @override
@@ -33,15 +35,61 @@ class WorkoutHistoryPanel extends StatelessWidget {
           const Text('(no exercise linked)', style: TextStyle(fontSize: 10, color: Colors.grey)),
         const SizedBox(height: 8),
         if (history.isEmpty)
-          const Padding(
-            padding: EdgeInsets.only(top: 4, bottom: 8),
-            child: Text('No scored entries yet.',
-                style: TextStyle(color: Colors.black45, fontSize: 13)),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.only(top: 4, bottom: 8),
+                child: Text('No scored entries yet.',
+                    style: TextStyle(color: Colors.black45, fontSize: 13)),
+              ),
+              if (sidePanel != null) ...[
+                const SizedBox(height: 4),
+                sidePanel!,
+              ],
+            ],
           )
         else ...[
           SizedBox(height: 150, child: WorkoutMiniLineChart(entries: chrono, goal: goal)),
           const SizedBox(height: 12),
-          WorkoutRecentTable(entries: recent, units: units),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final canUseSideBySide = sidePanel != null && constraints.maxWidth >= 560;
+              if (!canUseSideBySide) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    WorkoutRecentTable(entries: recent, units: units),
+                    if (sidePanel != null) ...[
+                      const SizedBox(height: 12),
+                      sidePanel!,
+                    ],
+                  ],
+                );
+              }
+
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    flex: 11,
+                    child: Align(
+                      alignment: Alignment.topLeft,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 190),
+                        child: WorkoutRecentTable(entries: recent, units: units),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 13,
+                    child: sidePanel!,
+                  ),
+                ],
+              );
+            },
+          ),
         ],
       ],
     );
@@ -290,8 +338,8 @@ class WorkoutRecentTable extends StatelessWidget {
   Widget build(BuildContext context) {
     return Table(
       columnWidths: const {
-        0: FlexColumnWidth(2),
-        1: FlexColumnWidth(1),
+        0: FlexColumnWidth(1.45),
+        1: FlexColumnWidth(0.95),
       },
       children: [
         TableRow(
@@ -300,12 +348,12 @@ class WorkoutRecentTable extends StatelessWidget {
           ),
           children: const [
             Padding(
-              padding: EdgeInsets.only(bottom: 4),
+              padding: EdgeInsets.only(bottom: 3),
               child: Text('Date',
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
             ),
             Padding(
-              padding: EdgeInsets.only(bottom: 4),
+              padding: EdgeInsets.only(bottom: 3),
               child: Text('Score',
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
             ),
@@ -314,12 +362,12 @@ class WorkoutRecentTable extends StatelessWidget {
         ...entries.map((e) => TableRow(
               children: [
                 Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  padding: const EdgeInsets.symmetric(vertical: 2),
                   child: Text(e['date'] as String,
                       style: const TextStyle(fontSize: 12)),
                 ),
                 Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  padding: const EdgeInsets.symmetric(vertical: 2),
                   child: Text('${e['score']} $units',
                       style: const TextStyle(fontSize: 12)),
                 ),

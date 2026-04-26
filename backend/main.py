@@ -12,7 +12,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import datetime
 import json
 import numpy as np
@@ -31,6 +31,7 @@ from jose import jwt, JWTError
 # ── Exercise database ──────────────────────────────────────────────────────────
 _EXERCISES: list = []
 _EXERCISES_IDX: dict = {}
+MSEQ_BASE_DEFAULT = 5
 
 def _load_exercises():
     global _EXERCISES, _EXERCISES_IDX
@@ -119,6 +120,139 @@ class WorkoutUpdate(BaseModel):
 class RoutineGenerationRequest(BaseModel):
     start_date: Optional[str] = None
     sequence_power: Optional[int] = 4
+    minimum_interval_days: Optional[int] = 2
+    mseq_base: Optional[int] = MSEQ_BASE_DEFAULT
+    active_symbols: Optional[int] = 1
+
+
+def _validate_generation_params(
+    sequence_power: int,
+    minimum_interval_days: int,
+    mseq_base: int,
+    active_symbols: int,
+):
+    if sequence_power < 2 or sequence_power > 6:
+        raise HTTPException(status_code=422, detail="sequence_power must be between 2 and 6")
+    if minimum_interval_days < 1 or minimum_interval_days > 14:
+        raise HTTPException(status_code=422, detail="minimum_interval_days must be between 1 and 14")
+    if mseq_base not in (2, 3, 5, 9):
+        raise HTTPException(status_code=422, detail="mseq_base must be 2, 3, 5, or 9")
+    if active_symbols < 1 or active_symbols > (mseq_base - 1):
+        raise HTTPException(
+            status_code=422,
+            detail=f"active_symbols must be between 1 and {mseq_base - 1}",
+        )
+
+
+def _compute_mseq_rate_stats(
+    *,
+    workout_count: int,
+    sequence_power: int,
+    minimum_interval_days: int,
+    mseq_base: int,
+    active_symbols: int,
+) -> Dict[str, Any]:
+    """Compute schedule/rate statistics for m-sequence parameters."""
+    num_frames = mseq_base ** sequence_power - 1
+    schedule_span_days = (num_frames - 1) * minimum_interval_days + 1
+
+    if workout_count <= 0:
+        return {
+            "sequence_power": sequence_power,
+            "minimum_interval_days": minimum_interval_days,
+            "mseq_base": mseq_base,
+            "active_symbols": active_symbols,
+            "num_workouts": 0,
+            "num_frames": num_frames,
+            "schedule_span_days": schedule_span_days,
+            "overall_mean_workouts_per_day": 0.0,
+            "overall_workouts_per_day_range": {"min": 0.0, "max": 0.0},
+            "per_workout_mean_workouts_per_day": 0.0,
+            "per_workout_workouts_per_day_range": {"min": 0.0, "max": 0.0},
+            "per_workout_mean_days_between_sessions": None,
+            "per_workout_days_between_sessions_range": {"min": None, "max": None},
+        }
+
+    counts: List[int] = []
+    per_workout_rates: List[float] = []
+    mean_days_between: List[float] = []
+    min_gap_days_all: List[float] = []
+    max_gap_days_all: List[float] = []
+    daily_workout_load = [0 for _ in range(schedule_span_days)]
+
+    for num in range(workout_count):
+        seq = mseq(mseq_base, sequence_power, whichSeq=num, shift=0, raw=True)
+        indices = [i for i in range(num_frames) if 1 <= int(seq[i]) <= active_symbols]
+
+        count = len(indices)
+        counts.append(count)
+        per_workout_rates.append(count / schedule_span_days)
+
+        for idx in indices:
+            day_index = idx * minimum_interval_days
+            if 0 <= day_index < schedule_span_days:
+                daily_workout_load[day_index] += 1
+
+        if len(indices) >= 2:
+            gaps = [
+                (indices[i + 1] - indices[i]) * minimum_interval_days
+                for i in range(len(indices) - 1)
+            ]
+            mean_days_between.append(sum(gaps) / len(gaps))
+            min_gap_days_all.append(min(gaps))
+            max_gap_days_all.append(max(gaps))
+
+    total_workouts = sum(counts)
+    overall_mean_rate = total_workouts / schedule_span_days
+    per_workout_mean_rate = sum(per_workout_rates) / len(per_workout_rates)
+
+    min_count = min(counts)
+    max_count = max(counts)
+    min_daily_load = min(daily_workout_load)
+    max_daily_load = max(daily_workout_load)
+    overall_range = {
+        "min": float(min_daily_load),
+        "max": float(max_daily_load),
+    }
+
+    # If m-sequence balancing makes per-workout mean rates identical,
+    # derive range from observed cadence extremes (1 / max_gap .. 1 / min_gap).
+    if min_gap_days_all and max_gap_days_all:
+        per_workout_range = {
+            "min": 1.0 / max(max_gap_days_all),
+            "max": 1.0 / min(min_gap_days_all),
+        }
+    else:
+        per_workout_range = {
+            "min": min_count / schedule_span_days,
+            "max": max_count / schedule_span_days,
+        }
+
+    if mean_days_between:
+        mean_days_between_value = sum(mean_days_between) / len(mean_days_between)
+        days_between_range = {
+            "min": min(mean_days_between),
+            "max": max(mean_days_between),
+        }
+    else:
+        mean_days_between_value = None
+        days_between_range = {"min": None, "max": None}
+
+    return {
+        "sequence_power": sequence_power,
+        "minimum_interval_days": minimum_interval_days,
+        "mseq_base": mseq_base,
+        "active_symbols": active_symbols,
+        "num_workouts": workout_count,
+        "num_frames": num_frames,
+        "schedule_span_days": schedule_span_days,
+        "overall_mean_workouts_per_day": overall_mean_rate,
+        "overall_workouts_per_day_range": overall_range,
+        "per_workout_mean_workouts_per_day": per_workout_mean_rate,
+        "per_workout_workouts_per_day_range": per_workout_range,
+        "per_workout_mean_days_between_sessions": mean_days_between_value,
+        "per_workout_days_between_sessions_range": days_between_range,
+    }
 
 class WorkoutCreate(BaseModel):
     name: str
@@ -132,6 +266,7 @@ class WorkoutUpdateRequest(BaseModel):
     units: str
     at_park: bool
     exercise_id: Optional[str] = None
+    new_name: Optional[str] = None
 
 # Single-user mode: all data belongs to the default user
 DEFAULT_USERNAME = "default_user"
@@ -375,8 +510,13 @@ async def generate_new_routine(request: Request, request_body: RoutineGeneration
     if not workouts:
         raise HTTPException(status_code=400, detail="No workouts found — add workouts before generating a routine")
 
-    SEQUENCE_POWER = request_body.sequence_power or 4
-    NUM_FRAMES = 5 ** SEQUENCE_POWER - 1
+    sequence_power = request_body.sequence_power or 4
+    minimum_interval_days = request_body.minimum_interval_days or 2
+    mseq_base = request_body.mseq_base or MSEQ_BASE_DEFAULT
+    active_symbols = request_body.active_symbols or 1
+    _validate_generation_params(sequence_power, minimum_interval_days, mseq_base, active_symbols)
+
+    num_frames = mseq_base ** sequence_power - 1
 
     if request_body.start_date:
         try:
@@ -386,17 +526,17 @@ async def generate_new_routine(request: Request, request_body: RoutineGeneration
     else:
         base = datetime.date.today()
 
-    date_list = [base + datetime.timedelta(days=2 * x) for x in range(NUM_FRAMES)]
+    date_list = [base + datetime.timedelta(days=minimum_interval_days * x) for x in range(num_frames)]
 
     # Clear existing schedule for this user
     session.query(ScheduleEntry).filter(ScheduleEntry.user_id == user_id).delete()
 
     new_entries = []
     for num, workout in enumerate(workouts):
-        shift = np.random.randint(0, NUM_FRAMES - 1)
-        seq = mseq(5, SEQUENCE_POWER, whichSeq=num, shift=shift)
-        for i in range(NUM_FRAMES):
-            if seq[i] == 1:
+        shift = np.random.randint(0, num_frames - 1)
+        seq = mseq(mseq_base, sequence_power, whichSeq=num, shift=shift, raw=True)
+        for i in range(num_frames):
+            if 1 <= int(seq[i]) <= active_symbols:
                 new_entries.append(ScheduleEntry(
                     user_id=user_id,
                     workout_id=workout.id,
@@ -407,8 +547,21 @@ async def generate_new_routine(request: Request, request_body: RoutineGeneration
     session.add_all(new_entries)
     session.commit()
 
+    stats = _compute_mseq_rate_stats(
+        workout_count=len(workouts),
+        sequence_power=sequence_power,
+        minimum_interval_days=minimum_interval_days,
+        mseq_base=mseq_base,
+        active_symbols=active_symbols,
+    )
+
     if not new_entries:
-        return {"message": "New routine generated successfully", "total_workouts": 0, "date_range": {}}
+        return {
+            "message": "New routine generated successfully",
+            "total_workouts": 0,
+            "date_range": {},
+            "stats": stats,
+        }
 
     all_dates = [e.date for e in new_entries]
     return {
@@ -417,8 +570,31 @@ async def generate_new_routine(request: Request, request_body: RoutineGeneration
         "date_range": {
             "start": min(all_dates).strftime('%Y-%m-%d'),
             "end": max(all_dates).strftime('%Y-%m-%d')
-        }
+        },
+        "stats": stats,
     }
+
+
+@app.get("/mseq/stats")
+@app.get("/schedule/stats")
+async def get_schedule_stats(
+    sequence_power: int = 4,
+    minimum_interval_days: int = 2,
+    mseq_base: int = MSEQ_BASE_DEFAULT,
+    active_symbols: int = 1,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Return m-sequence schedule/rate stats for the current user's workout count."""
+    _validate_generation_params(sequence_power, minimum_interval_days, mseq_base, active_symbols)
+    workout_count = session.query(Workout).filter(Workout.user_id == user_id).count()
+    return _compute_mseq_rate_stats(
+        workout_count=workout_count,
+        sequence_power=sequence_power,
+        minimum_interval_days=minimum_interval_days,
+        mseq_base=mseq_base,
+        active_symbols=active_symbols,
+    )
 
 @app.post("/workouts")
 @limiter.limit("30/minute")
@@ -456,11 +632,12 @@ async def update_workout(request: Request, workout_name: str, workout: WorkoutUp
     if not existing:
         raise HTTPException(status_code=404, detail="Workout not found")
 
+    if workout.new_name and workout.new_name.strip():
+        existing.name = workout.new_name.strip()
     existing.goal = workout.goal
     existing.units = workout.units
     existing.at_park = workout.at_park
-    if workout.exercise_id is not None:
-        existing.exercise_id = workout.exercise_id
+    existing.exercise_id = workout.exercise_id
     session.commit()
     return {"message": "Workout updated successfully"}
 
@@ -501,10 +678,10 @@ async def get_workout_history(
     if not workout:
         raise HTTPException(status_code=404, detail="Workout not found")
 
-    since_date: Optional[date] = None
+    since_date: Optional[datetime.date] = None
     if since:
         try:
-            since_date = date.fromisoformat(since)
+            since_date = datetime.date.fromisoformat(since)
         except ValueError:
             raise HTTPException(status_code=422, detail="since must be YYYY-MM-DD")
 
@@ -530,6 +707,65 @@ async def get_workout_history(
         {"date": e.date.strftime('%Y-%m-%d'), "score": e.score}
         for e in entries
     ]
+
+
+@app.get("/workouts/{workout_name}/interval-distribution")
+async def get_workout_interval_distribution(
+    workout_name: str,
+    max_days: int = 60,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Return histogram data for days-between-sessions for one workout."""
+    if max_days < 2 or max_days > 365:
+        raise HTTPException(status_code=422, detail="max_days must be between 2 and 365")
+
+    workout = session.query(Workout).filter(
+        Workout.user_id == user_id,
+        Workout.name == workout_name
+    ).first()
+    if not workout:
+        raise HTTPException(status_code=404, detail="Workout not found")
+
+    entries = (
+        session.query(ScheduleEntry)
+        .filter(
+            ScheduleEntry.user_id == user_id,
+            ScheduleEntry.workout_id == workout.id,
+        )
+        .order_by(ScheduleEntry.date.asc())
+        .all()
+    )
+
+    if len(entries) < 2:
+        return {
+            "workout": workout_name,
+            "interval_count": 0,
+            "intervals": [],
+            "bins": [],
+        }
+
+    intervals = []
+    bins = {}
+    for i in range(1, len(entries)):
+        days = (entries[i].date - entries[i - 1].date).days
+        if days <= 0:
+            continue
+        clipped = min(days, max_days)
+        intervals.append(clipped)
+        bins[clipped] = bins.get(clipped, 0) + 1
+
+    bins_list = [
+        {"days": day, "count": bins[day]}
+        for day in sorted(bins.keys())
+    ]
+
+    return {
+        "workout": workout_name,
+        "interval_count": len(intervals),
+        "intervals": intervals,
+        "bins": bins_list,
+    }
 
 @app.get("/export")
 async def export_schedule_csv(user_id: int = Depends(get_current_user_id), session: Session = Depends(get_session)):

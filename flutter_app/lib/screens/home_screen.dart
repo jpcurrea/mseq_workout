@@ -21,6 +21,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Map<int, TextEditingController> scoreControllers = {};
   bool isUpdatingScores = false;
   DateTime? _selectedDate;
+  bool _redirectedToManage = false;
 
   @override
   void initState() {
@@ -66,6 +67,14 @@ class _HomeScreenState extends State<HomeScreen> {
         todayWorkouts = workouts;
         isLoading = false;
       });
+
+      if (_selectedDate == null && workouts.isEmpty && !_redirectedToManage && mounted) {
+        _redirectedToManage = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          Navigator.pushReplacementNamed(context, '/manage-workouts');
+        });
+      }
     } catch (e) {
       setState(() {
         errorMessage = e.toString();
@@ -86,9 +95,6 @@ class _HomeScreenState extends State<HomeScreen> {
           icon: const Icon(Icons.menu),
           onSelected: (String value) async {
             switch (value) {
-              case 'generate_routine':
-                _showGenerateRoutineDialog();
-                break;
               case 'manage_workouts':
                 Navigator.pushNamed(context, '/manage-workouts');
                 break;
@@ -110,14 +116,6 @@ class _HomeScreenState extends State<HomeScreen> {
             }
           },
           itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-            const PopupMenuItem<String>(
-              value: 'generate_routine',
-              child: ListTile(
-                leading: Icon(Icons.auto_fix_high),
-                title: Text('Generate New Routine'),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ),
             const PopupMenuItem<String>(
               value: 'manage_workouts',
               child: ListTile(
@@ -280,65 +278,6 @@ class _HomeScreenState extends State<HomeScreen> {
         },
       ),
     );
-  }
-
-  void _showGenerateRoutineDialog() {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('Generate New Routine'),
-          content: const Text(
-            'This will generate a new workout routine. Your current progress will be preserved, but the schedule will be updated.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                Navigator.of(context).pop();
-                await _generateNewRoutine();
-              },
-              child: const Text('Generate'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Future<void> _generateNewRoutine() async {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        return const AlertDialog(
-          content: Row(
-            children: [
-              CircularProgressIndicator(),
-              SizedBox(width: 16),
-              Text('Generating new routine...'),
-            ],
-          ),
-        );
-      },
-    );
-
-    try {
-      await ApiService.generateNewRoutine();
-      Navigator.of(context).pop(); // Close progress dialog
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('New routine generated successfully!')),
-      );
-      loadWorkouts(); // Refresh the workout list
-    } catch (e) {
-      Navigator.of(context).pop(); // Close progress dialog
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error generating routine: $e')),
-      );
-    }
   }
 
   Future<void> _pickDate() async {

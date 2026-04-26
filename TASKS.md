@@ -1,6 +1,7 @@
 # Workout App - Task List
 
-**Last Updated:** April 25, 2026
+**Last Updated:** April 26, 2026  
+**Version:** 1.0 🎉
 
 ---
 
@@ -58,9 +59,9 @@ Tasks are ordered by priority. Work top to bottom.
 ---
 
 ### 3. M-Sequence Generation Parameter UI
-**Status:** Not Started  
+**Status:** ✅ Done  
 **Priority:** Medium — unlocks meaningful schedule customization  
-**Description:** Expose the two hidden routine-generation parameters (workout frequency and sequence power) in the UI, and add a live stats preview so the user can see exactly what schedule they are about to generate.
+**Description:** Expose routine-generation controls in the UI (sequence power, minimum interval, active symbols, and m-sequence base), and add a live stats preview so the user can see exactly what schedule they are about to generate.
 
 #### Current hardcoding (reference)
 ```python
@@ -71,11 +72,13 @@ date_list = [base + timedelta(days=2 * x)   # "2" = every-other-day, hardcoded
 ```
 
 #### Backend
-- [ ] Extend `RoutineGenerationRequest` with `frequency_days: Optional[int] = 2`
-- [ ] Replace hardcoded `2` in `generate_new_routine` with `request.frequency_days`
-- [ ] Validate: `1 <= frequency_days <= 14`; return 422 with message if out of range
-- [ ] Clamp `sequence_power` validation to 3–6 (power 6 → 5^6−1 = 15 624 slots; practical max)
-- [ ] Add `GET /schedule/stats` endpoint — returns a summary of the current user's schedule:
+- [x] Extend `RoutineGenerationRequest` with `minimum_interval_days`, `mseq_base`, and `active_symbols`
+- [x] Replace hardcoded interval logic with `request.minimum_interval_days`
+- [x] Validate: `1 <= minimum_interval_days <= 14`; return 422 with message if out of range
+- [x] Validate: `2 <= sequence_power <= 6`
+- [x] Validate: `mseq_base ∈ {2, 3, 5, 9}` and `1 <= active_symbols <= (mseq_base - 1)`
+- [x] Add raw m-sequence mode (`raw=True`) for correct active-symbol filtering before value remapping
+- [x] Add `GET /mseq/stats` endpoint — returns a summary of the current user's schedule:
   ```json
   {
     "total_slots": 624,
@@ -88,18 +91,19 @@ date_list = [base + timedelta(days=2 * x)   # "2" = every-other-day, hardcoded
   }
   ```
 
-#### Flutter — Generate Routine dialog
-Find wherever `POST /generate-routine` is called (likely `workout_management_screen.dart` or `home_screen.dart`) and extend the dialog with:
-- [ ] **Frequency** `DropdownButtonFormField` — options: 1 (daily), 2 (every other day), 3, 4, 5, 7 (weekly); default 2
-- [ ] **Sequence power** `DropdownButtonFormField` — options: 3 → "124 slots", 4 → "624 slots", 5 → "3 124 slots"; default 4
-- [ ] **Live stats preview card** that recomputes on every dropdown change:
-  - Total slots: `5^power − 1`
-  - Schedule span: `(5^power − 1) × frequency_days` days (and approximate years)
-  - Effective avg cadence: one workout slot every `frequency_days` days
-- [ ] Pass both params to `generateRoutine()` in `ApiService`
-
-#### Flutter — schedule stats card on home screen (optional)
-- [ ] Call `GET /schedule/stats` when home screen loads; show a small collapsible summary card beneath the date header (completion rate, span, next date)
+#### Flutter — Generate Routine (moved to Manage Workouts, inline — no dialog)
+- [x] **Sequence power** dropdown — options: 2 → 6 with dynamic frame count
+- [x] **Workout density (active symbols)** dropdown — auto-scales by selected base
+- [x] **Advanced m-sequence settings** section with **m-sequence base** selector (2, 3, 5, 9)
+- [x] **Minimum interval (days)** dropdown — controls spacing between schedule frames
+- [x] **Live stats preview card** with total slots, schedule span, avg cadence — updates on dropdown change
+- [x] Pass all generation params to `generateRoutine()` and `getScheduleStats()` in `ApiService`
+- [x] Generate Routine moved out of Home popup menu → Section 2 of Manage Workouts (inline)
+- [x] Home screen auto-redirects to Manage Workouts when no schedule exists
+- [x] Per-workout interval-distribution bar chart (mirrors `plot.py` histogram) in expanded workout card
+- [x] Interval chart displayed beside score table via `sidePanel` slot in `WorkoutHistoryPanel`
+- [x] Stats range math fixed (min/max computed from actual daily loads / gap extremes)
+- [x] Added extra top padding to prevent header cropping in expanded Advanced settings
 
 **Estimated Time:** 3-4 hours  
 **Files:**  
@@ -117,6 +121,7 @@ _Nothing in progress_
 
 ## ✅ Done
 
+- **M-Sequence Generation Parameter UI** — Sequence power (2-6), minimum interval, active symbols, and advanced base selector (2/3/5/9) with live stats preview and correct raw-symbol density handling. Generate Routine is inline in Manage Workouts; Home auto-redirects when no schedule exists; per-workout interval-distribution chart and stats range math fixes are included.
 - **Exercise Database + Autocomplete** — 873-exercise free-exercise-db bundled as `exercises.json`; loaded at startup; `/exercises/search` and `/exercises/{id}` endpoints; `exercise_id` column added to `workouts` table with auto-migration; `AddWorkoutDialog` has 300ms-debounced autocomplete with dropdown (name + muscles); exercise cover photo shown in expanded workout card
 - **Progress Plotting** — dedicated `ProgressScreen` with workout dropdown, pinch/pan zoom (replaced 7d/30d/all selector), full interactive line chart (touch to highlight, white tooltip text), goal line with label, summary strip (latest/best/avg/% goal/count), scrollable history table; mini sparkline in Today's Workout card expanded panels; accessible via "Progress Charts" in hamburger menu
 - **Logout + Session Management** — Sign Out in hamburger menu; "Stay signed in" remember-me checkbox on login; auto re-auth on JWT expiry when remember-me is set; 24h token expiry

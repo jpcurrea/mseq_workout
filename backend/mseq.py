@@ -23,7 +23,7 @@ def test_num_flash(test_num, num_pts, dist=10, col_1=255, col_2=96):
 
 # msequence from a matlab script
 
-def mseq(baseVal, powerVal, shift=1, whichSeq=1):
+def mseq(baseVal, powerVal, shift=1, whichSeq=1, raw=False):
     bitNum=baseVal**powerVal-1;
     register=np.ones([powerVal]);
     if baseVal==2:
@@ -436,6 +436,9 @@ def mseq(baseVal, powerVal, shift=1, whichSeq=1):
     if not shift==None:
         shift = shift%len(ms)
         ms = np.concatenate([ms[shift:], ms[:shift]])
+
+    if raw:
+        return ms
 
     if baseVal==2:
         ms = ms*2-1

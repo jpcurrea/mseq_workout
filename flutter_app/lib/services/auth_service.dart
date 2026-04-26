@@ -10,7 +10,7 @@ class AuthService {
 
   // Must match FRONTEND_URL in backend .env
   static const String backendUrl = 'https://workout-backend-h6pd.onrender.com'; // production
-  // static const String backendUrl = 'http://localhost:8000'; // local dev
+  // static const String backendUrl = 'https://workout-backend-h6pd.onrender.com'; // local dev
 
   static Future<String?> getToken() async {
     return _storage.read(key: _tokenKey);

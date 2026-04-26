@@ -4,7 +4,7 @@ import '../models/workout.dart';
 import 'auth_service.dart';
 
 class ApiService {
-  // static const String baseUrl = 'http://localhost:8000';
+  // static const String baseUrl = 'https://workout-backend-h6pd.onrender.com';
   static const String baseUrl = 'https://workout-backend-h6pd.onrender.com';
 
   static Future<Map<String, String>> _headers() async {
@@ -92,6 +92,9 @@ class ApiService {
   static Future<Map<String, dynamic>> generateNewRoutine({
     String? startDate,
     int? sequencePower,
+    int? minimumIntervalDays,
+    int? mseqBase,
+    int? activeSymbols,
   }) async {
     try {
       final response = await http.post(
@@ -100,6 +103,9 @@ class ApiService {
         body: json.encode({
           if (startDate != null) 'start_date': startDate,
           if (sequencePower != null) 'sequence_power': sequencePower,
+          if (minimumIntervalDays != null) 'minimum_interval_days': minimumIntervalDays,
+          if (mseqBase != null) 'mseq_base': mseqBase,
+          if (activeSymbols != null) 'active_symbols': activeSymbols,
         }),
       );
 
@@ -108,6 +114,31 @@ class ApiService {
       } else {
         throw Exception('Failed to generate routine: ${response.statusCode}');
       }
+    } catch (e) {
+      throw Exception('Network error: $e');
+    }
+  }
+
+  static Future<Map<String, dynamic>> getScheduleStats({
+    required int sequencePower,
+    required int minimumIntervalDays,
+    required int mseqBase,
+    required int activeSymbols,
+  }) async {
+    try {
+      final uri = Uri.parse('$baseUrl/mseq/stats').replace(
+        queryParameters: {
+          'sequence_power': '$sequencePower',
+          'minimum_interval_days': '$minimumIntervalDays',
+          'mseq_base': '$mseqBase',
+          'active_symbols': '$activeSymbols',
+        },
+      );
+      final response = await http.get(uri, headers: await _headers());
+      if (response.statusCode == 200) {
+        return json.decode(response.body) as Map<String, dynamic>;
+      }
+      throw Exception('Failed to load schedule stats: ${response.statusCode}');
     } catch (e) {
       throw Exception('Network error: $e');
     }
@@ -136,16 +167,27 @@ class ApiService {
     }
   }
 
-  static Future<void> updateWorkout(String workoutName, double goal, String units, bool atPark) async {
+  static Future<void> updateWorkout(
+    String workoutName,
+    double goal,
+    String units,
+    bool atPark, {
+    String? exerciseId,
+    bool exerciseIdProvided = false,
+    String? newName,
+  }) async {
     try {
+      final body = <String, dynamic>{
+        'goal': goal,
+        'units': units,
+        'at_park': atPark,
+        if (exerciseIdProvided) 'exercise_id': exerciseId,
+        if (newName != null && newName.isNotEmpty) 'new_name': newName,
+      };
       final response = await http.put(
         Uri.parse('$baseUrl/workouts/$workoutName'),
         headers: await _headers(),
-        body: json.encode({
-          'goal': goal,
-          'units': units,
-          'at_park': atPark,
-        }),
+        body: json.encode(body),
       );
 
       if (response.statusCode != 200) {
@@ -209,6 +251,24 @@ class ApiService {
       } else {
         throw Exception('Failed to load history: ${response.statusCode}');
       }
+    } catch (e) {
+      throw Exception('Network error: $e');
+    }
+  }
+
+  static Future<Map<String, dynamic>> getWorkoutIntervalDistribution(
+    String workoutName, {
+    int maxDays = 60,
+  }) async {
+    try {
+      final encodedName = Uri.encodeComponent(workoutName);
+      final uri = Uri.parse('$baseUrl/workouts/$encodedName/interval-distribution')
+          .replace(queryParameters: {'max_days': '$maxDays'});
+      final response = await http.get(uri, headers: await _headers());
+      if (response.statusCode == 200) {
+        return json.decode(response.body) as Map<String, dynamic>;
+      }
+      throw Exception('Failed to load interval distribution: ${response.statusCode}');
     } catch (e) {
       throw Exception('Network error: $e');
     }
