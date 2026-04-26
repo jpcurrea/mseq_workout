@@ -26,7 +26,10 @@ class WorkoutHistoryPanel extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (exerciseId != null) WorkoutExerciseImage(exerciseId: exerciseId!),
+        if (exerciseId != null)
+          WorkoutExerciseImage(exerciseId: exerciseId!)
+        else
+          const Text('(no exercise linked)', style: TextStyle(fontSize: 10, color: Colors.grey)),
         const SizedBox(height: 8),
         SizedBox(height: 150, child: WorkoutMiniLineChart(entries: chrono, goal: goal)),
         const SizedBox(height: 12),
@@ -61,7 +64,17 @@ class WorkoutExerciseImage extends StatelessWidget {
                 height: 140,
                 child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
               ),
-        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+        errorBuilder: (_, __, ___) => Container(
+              height: 140,
+              color: Colors.grey.shade200,
+              child: Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.broken_image, color: Colors.grey),
+                  Text('No image: $exerciseId',
+                      style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                ]),
+              ),
+            ),
       ),
     );
   }
