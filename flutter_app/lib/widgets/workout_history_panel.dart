@@ -81,36 +81,62 @@ class _WorkoutExerciseImageState extends State<WorkoutExerciseImage> {
     super.dispose();
   }
 
+  Widget _frame0Image() => Image.network(
+        '$_base/${widget.exerciseId}/0.jpg',
+        height: _height,
+        width: double.infinity,
+        fit: BoxFit.contain,
+        loadingBuilder: (_, child, progress) => progress == null
+            ? child
+            : SizedBox(
+                height: _height,
+                child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              ),
+        errorBuilder: (_, __, ___) => Container(
+          height: _height,
+          color: Colors.grey.shade200,
+          child: Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.broken_image, color: Colors.grey),
+              Text('No image: ${widget.exerciseId}',
+                  style: const TextStyle(fontSize: 10, color: Colors.grey)),
+            ]),
+          ),
+        ),
+      );
+
+  Widget _frame1Image() => Image.network(
+        '$_base/${widget.exerciseId}/1.jpg',
+        height: _height,
+        width: double.infinity,
+        fit: BoxFit.contain,
+        // frame 1 missing is fine — frame 0 will stay visible underneath
+        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+      );
+
   @override
   Widget build(BuildContext context) {
-    final url = '$_base/${widget.exerciseId}/$_frame.jpg';
     return ClipRRect(
       borderRadius: BorderRadius.circular(6),
-      child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 300),
-        child: Image.network(
-          url,
-          key: ValueKey(url),
-          height: _height,
-          width: double.infinity,
-          fit: BoxFit.contain,
-          loadingBuilder: (_, child, progress) => progress == null
-              ? child
-              : SizedBox(
-                  height: _height,
-                  child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-                ),
-          errorBuilder: (_, __, ___) => Container(
-            height: _height,
-            color: Colors.grey.shade200,
-            child: Center(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.broken_image, color: Colors.grey),
-                Text('No image: ${widget.exerciseId}',
-                    style: const TextStyle(fontSize: 10, color: Colors.grey)),
-              ]),
+      child: SizedBox(
+        height: _height,
+        width: double.infinity,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // Frame 0 — fades out when _frame == 1
+            AnimatedOpacity(
+              opacity: _frame == 0 ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 300),
+              child: _frame0Image(),
             ),
-          ),
+            // Frame 1 — fades in when _frame == 1
+            AnimatedOpacity(
+              opacity: _frame == 1 ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 300),
+              child: _frame1Image(),
+            ),
+          ],
         ),
       ),
     );
