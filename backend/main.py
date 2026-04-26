@@ -14,6 +14,7 @@ from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel
 from typing import List, Optional
 import datetime
+import json
 import numpy as np
 import secrets
 import sys
@@ -26,6 +27,25 @@ from auth import router as auth_router, SECRET_KEY, ALGORITHM
 
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
+
+# ── Exercise database ──────────────────────────────────────────────────────────
+_EXERCISES: list = []
+_EXERCISES_IDX: dict = {}
+
+def _load_exercises():
+    global _EXERCISES, _EXERCISES_IDX
+    path = os.path.join(get_data_dir(), "exercises.json")
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            _EXERCISES = json.load(f)
+        _EXERCISES_IDX = {ex["id"]: ex for ex in _EXERCISES}
+        print(f"Loaded {len(_EXERCISES)} exercises from exercises.json")
+    else:
+        print("Warning: exercises.json not found — exercise autocomplete disabled")
+
+_EXERCISE_IMAGE_BASE = (
+    "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises"
+)
 
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -77,6 +97,7 @@ class WorkoutSchema(BaseModel):
     goal: float
     units: str
     at_park: bool
+    exercise_id: Optional[str] = None
 
 class WorkoutScheduleItem(BaseModel):
     date: str
@@ -85,6 +106,7 @@ class WorkoutScheduleItem(BaseModel):
     units: str
     at_park: bool
     goal: float
+    exercise_id: Optional[str] = None
 
 class WorkoutUpdate(BaseModel):
     workout: str
@@ -100,11 +122,13 @@ class WorkoutCreate(BaseModel):
     goal: float
     units: str
     at_park: bool
+    exercise_id: Optional[str] = None
 
 class WorkoutUpdateRequest(BaseModel):
     goal: float
     units: str
     at_park: bool
+    exercise_id: Optional[str] = None
 
 # Single-user mode: all data belongs to the default user
 DEFAULT_USERNAME = "default_user"
@@ -185,6 +209,7 @@ def migrate_from_files_if_empty(session: Session, user_id: int):
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    _load_exercises()
     session = create_session()
     try:
         user = ensure_default_user(session)
@@ -199,7 +224,13 @@ async def root():
 @app.get("/workouts", response_model=List[WorkoutSchema])
 async def get_workouts(user_id: int = Depends(get_current_user_id), session: Session = Depends(get_session)):
     workouts = session.query(Workout).filter(Workout.user_id == user_id).all()
-    return [WorkoutSchema(name=w.name, goal=w.goal, units=w.units, at_park=w.at_park) for w in workouts]
+    return [
+        WorkoutSchema(
+            name=w.name, goal=w.goal, units=w.units, at_park=w.at_park,
+            exercise_id=w.exercise_id
+        )
+        for w in workouts
+    ]
 
 @app.get("/today", response_model=List[WorkoutScheduleItem])
 async def get_today_workouts(user_id: int = Depends(get_current_user_id), session: Session = Depends(get_session)):
@@ -237,7 +268,8 @@ async def get_today_workouts(user_id: int = Depends(get_current_user_id), sessio
             score=entry.score,
             units=workout.units,
             at_park=workout.at_park,
-            goal=workout.goal
+            goal=workout.goal,
+            exercise_id=workout.exercise_id
         )
         for entry, workout in entries
     ]
@@ -281,7 +313,8 @@ async def get_workouts_for_date(date: str, user_id: int = Depends(get_current_us
             score=entry.score,
             units=workout.units,
             at_park=workout.at_park,
-            goal=workout.goal
+            goal=workout.goal,
+            exercise_id=workout.exercise_id
         )
         for entry, workout in entries
     ]
@@ -385,7 +418,8 @@ async def create_workout(request: Request, workout: WorkoutCreate, user_id: int 
         name=workout.name,
         goal=workout.goal,
         units=workout.units,
-        at_park=workout.at_park
+        at_park=workout.at_park,
+        exercise_id=workout.exercise_id
     )
     session.add(new_workout)
     session.commit()
@@ -406,6 +440,8 @@ async def update_workout(request: Request, workout_name: str, workout: WorkoutUp
     existing.goal = workout.goal
     existing.units = workout.units
     existing.at_park = workout.at_park
+    if workout.exercise_id is not None:
+        existing.exercise_id = workout.exercise_id
     session.commit()
     return {"message": "Workout updated successfully"}
 
@@ -510,6 +546,48 @@ async def export_schedule_csv(user_id: int = Depends(get_current_user_id), sessi
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=workout_history.csv"}
     )
+
+# ── Exercise database endpoints ────────────────────────────────────────────────
+
+@app.get("/exercises/search")
+async def search_exercises(
+    q: str = "",
+    limit: int = 10,
+    user_id: int = Depends(get_current_user_id),
+):
+    """Prefix/substring search against the bundled exercise database."""
+    if not q.strip() or not _EXERCISES:
+        return []
+    q_lower = q.strip().lower()
+    results = []
+    for ex in _EXERCISES:
+        if q_lower in ex.get("name", "").lower():
+            results.append({
+                "id": ex["id"],
+                "name": ex["name"],
+                "equipment": ex.get("equipment"),
+                "primaryMuscles": ex.get("primaryMuscles", []),
+                "imageUrl": f"{_EXERCISE_IMAGE_BASE}/{ex['id']}/0.jpg",
+            })
+            if len(results) >= limit:
+                break
+    return results
+
+
+@app.get("/exercises/{exercise_id}")
+async def get_exercise(
+    exercise_id: str,
+    user_id: int = Depends(get_current_user_id),
+):
+    """Return full exercise record including instructions."""
+    ex = _EXERCISES_IDX.get(exercise_id)
+    if not ex:
+        raise HTTPException(status_code=404, detail="Exercise not found")
+    return {
+        **ex,
+        "imageUrl": f"{_EXERCISE_IMAGE_BASE}/{ex['id']}/0.jpg",
+    }
+
 
 if __name__ == "__main__":
     import uvicorn

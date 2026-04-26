@@ -1,0 +1,10 @@
+import sqlite3
+conn = sqlite3.connect('data/workout_app.db')
+c = conn.cursor()
+c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+print('Tables:', c.fetchall())
+c.execute('SELECT COUNT(*) FROM workouts')
+print('Workouts:', c.fetchone())
+c.execute('SELECT COUNT(*) FROM schedule')
+print('Schedule entries:', c.fetchone())
+conn.close()

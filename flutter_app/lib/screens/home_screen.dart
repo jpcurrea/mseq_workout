@@ -575,7 +575,12 @@ class _WorkoutCardState extends State<_WorkoutCard> {
                         child: Text('No scored entries yet.',
                             style: TextStyle(color: Colors.black45, fontSize: 13)),
                       )
-                    : _HistoryPanel(history: _history!, units: workout.units, goal: workout.goal),
+                    : _HistoryPanel(
+                        history: _history!,
+                        units: workout.units,
+                        goal: workout.goal,
+                        exerciseId: workout.exerciseId,
+                      ),
           ),
         ],
       ),
@@ -589,8 +594,14 @@ class _HistoryPanel extends StatelessWidget {
   final List<Map<String, dynamic>> history;
   final String units;
   final double goal;
+  final String? exerciseId;
 
-  const _HistoryPanel({required this.history, required this.units, required this.goal});
+  const _HistoryPanel({
+    required this.history,
+    required this.units,
+    required this.goal,
+    this.exerciseId,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -601,6 +612,7 @@ class _HistoryPanel extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (exerciseId != null) _ExerciseImage(exerciseId: exerciseId!),
         const SizedBox(height: 8),
         SizedBox(height: 150, child: _MiniLineChart(entries: chrono, goal: goal)),
         const SizedBox(height: 12),
@@ -609,6 +621,38 @@ class _HistoryPanel extends StatelessWidget {
     );
   }
 }
+
+// ─── Exercise reference image ────────────────────────────────────────────────
+
+class _ExerciseImage extends StatelessWidget {
+  final String exerciseId;
+  const _ExerciseImage({required this.exerciseId});
+
+  static const _base =
+      'https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises';
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: Image.network(
+        '$_base/$exerciseId/0.jpg',
+        height: 140,
+        width: double.infinity,
+        fit: BoxFit.cover,
+        loadingBuilder: (_, child, progress) => progress == null
+            ? child
+            : const SizedBox(
+                height: 140,
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              ),
+        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+      ),
+    );
+  }
+}
+
+// ─── Mini line chart ─────────────────────────────────────────────────────────
 
 class _MiniLineChart extends StatelessWidget {
   final List<Map<String, dynamic>> entries;

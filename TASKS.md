@@ -1,6 +1,6 @@
 # Workout App - Task List
 
-**Last Updated:** April 18, 2026
+**Last Updated:** April 25, 2026
 
 ---
 
@@ -13,12 +13,12 @@ Tasks are ordered by priority. Work top to bottom.
 ### 1. Progress Plotting
 **Status:** ✅ Done  
 **Description:** Add visual score-over-time charts to the workout screens.
-- [ ] Add `fl_chart` to pubspec.yaml
-- [ ] Line chart of score over time per workout
-- [ ] Interactive (tap point for exact values)
-- [ ] Date range selector (7d / 30d / all time)
-- [ ] Show goal line on chart
-- [ ] Add chart to workout details dropdown and workout management screen
+- [x] Add `fl_chart` to pubspec.yaml
+- [x] Line chart of score over time per workout
+- [x] Interactive (tap point for exact values, white tooltip text)
+- [x] Date range selector replaced with pinch/pan zoom (no 7d/30d buttons)
+- [x] Show goal line on chart
+- [x] Add mini chart to workout card expanded panel (Today's Workout)
 
 **Estimated Time:** 3-4 hours  
 **Files:** `flutter_app/pubspec.yaml`, `flutter_app/lib/widgets/progress_chart.dart` (new), `flutter_app/lib/screens/workout_management_screen.dart`, `flutter_app/lib/screens/workout_detail_screen.dart`, `backend/main.py`
@@ -26,40 +26,30 @@ Tasks are ordered by priority. Work top to bottom.
 ---
 
 ### 2. Exercise Database + Autocomplete Lookup
-**Status:** Not Started  
+**Status:** ✅ Done  
 **Priority:** Medium — quality-of-life improvement for workout creation  
-**Description:** Embed a free exercise reference database so users can search and pick named exercises when creating workouts, and optionally show imagery in the workout detail view.
-
-#### Data source
-Use **[free-exercise-db](https://github.com/yuhonas/free-exercise-db)** (Unlicense / public domain) — 800+ exercises, single JSON file.  
-Fields per exercise: `id`, `name`, `force`, `level`, `mechanic`, `equipment`, `primaryMuscles`, `secondaryMuscles`, `instructions`, `category`, `images` (2 × JPG filename).  
-Images served via GitHub CDN — no download needed for images:  
-`https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/{id}/0.jpg`
-
-**Alternative for GIFs (optional upgrade):** Download the [ExerciseDB Kaggle open-source tier](https://www.kaggle.com/datasets/exercisedb/fitness-exercises-dataset) (MIT, 1500+ exercises, 180p animated GIFs). Bundle `exercises.json` + `gifs_180x180/` into `backend/data/` and serve GIFs as static files via FastAPI `StaticFiles`. Swaps GitHub-CDN image URLs for local paths — no API keys or network calls.
+**Description:** Embed a free exercise reference database so users can search and pick named exercises when creating workouts, and show imagery in the workout detail view.
 
 #### Backend
-- [ ] Download `dist/exercises.json` from free-exercise-db and place at `backend/data/exercises.json`
-- [ ] Load it once at startup into a module-level list (no DB needed)
-- [ ] `GET /exercises/search?q={query}&limit=10` — prefix/substring match on `name`, returns `[{id, name, equipment, primaryMuscles, imageUrl}]`
-- [ ] `GET /exercises/{id}` — full record including `instructions` list
-- [ ] Add nullable `exercise_id TEXT` column to `workouts` table; include in `WorkoutCreate` / `WorkoutUpdate` schemas
-- [ ] `POST /workouts` and `PUT /workouts/{id}` accept and persist the new field
+- [x] Download `dist/exercises.json` from free-exercise-db → `backend/data/exercises.json` (873 exercises, 978 KB)
+- [x] Load it once at startup into module-level list + dict index (no DB needed)
+- [x] `GET /exercises/search?q={query}&limit=10` — substring match on `name`
+- [x] `GET /exercises/{id}` — full record including `instructions`
+- [x] Add nullable `exercise_id TEXT` column to `workouts` table (auto-migrated via `ALTER TABLE` on startup)
+- [x] `WorkoutCreate`, `WorkoutUpdateRequest`, `WorkoutSchema`, `WorkoutScheduleItem` all carry `exercise_id`
+- [x] `POST /workouts` and `PUT /workouts/{name}` accept and persist `exercise_id`
 
-#### Flutter — workout creation / editing
-- [ ] In `workout_management_screen.dart` add/edit dialog: replace plain name `TextFormField` with `Autocomplete<Map<String, dynamic>>`
-- [ ] Debounce keystrokes 300 ms, call `GET /exercises/search?q=...`, display up to 10 suggestions below the field
-- [ ] Selecting a suggestion fills the name field and stores the `exercise_id`
-- [ ] Pass `exerciseId` when calling `createWorkout` / `updateWorkout` in `ApiService`
-- [ ] Update `Workout` model (`workout.dart`) with optional `exerciseId` field
+#### Flutter — workout creation
+- [x] `AddWorkoutDialog`: 300ms debounced name field → calls `/exercises/search` → dropdown shows name + primary muscles
+- [x] Selecting suggestion fills name and stores `exerciseId`; green link icon confirms linkage
+- [x] `ApiService.searchExercises()` added; `createWorkout` passes `exercise_id`
+- [x] `Workout` and `WorkoutScheduleItem` models updated with optional `exerciseId` field
 
 #### Flutter — workout detail view
-- [ ] In `_WorkoutCard` (home_screen.dart), if `exerciseId` is non-null, show `Image.network` of the first JPG at the top of the expanded panel; loading spinner placeholder; silently hidden on 404
-- [ ] Optional: add a collapsible "Instructions" tile below the history chart that lists the exercise text steps (fetched from `GET /exercises/{id}` on first expand)
+- [x] Expanded `_WorkoutCard`: shows 140px cover photo from GitHub CDN if `exerciseId` is set; spinner while loading; silently hidden on error
 
-**Estimated Time:** 4-6 hours  
 **Files:**  
-`backend/main.py`, `backend/data/exercises.json` (new download),  
+`backend/main.py`, `backend/database.py`, `backend/data/exercises.json`,  
 `flutter_app/lib/screens/workout_management_screen.dart`,  
 `flutter_app/lib/screens/home_screen.dart`,  
 `flutter_app/lib/services/api_service.dart`,  
@@ -127,7 +117,9 @@ _Nothing in progress_
 
 ## ✅ Done
 
-- **Progress Plotting** — dedicated `ProgressScreen` with workout dropdown, 7d/30d/all segmented range selector, full interactive line chart (touch to highlight, tooltip), goal line with label, summary strip (latest/best/avg/% goal/count), scrollable history table with % goal column and goal-met checkmark; accessible via "Progress Charts" in the hamburger menu
+- **Exercise Database + Autocomplete** — 873-exercise free-exercise-db bundled as `exercises.json`; loaded at startup; `/exercises/search` and `/exercises/{id}` endpoints; `exercise_id` column added to `workouts` table with auto-migration; `AddWorkoutDialog` has 300ms-debounced autocomplete with dropdown (name + muscles); exercise cover photo shown in expanded workout card
+- **Progress Plotting** — dedicated `ProgressScreen` with workout dropdown, pinch/pan zoom (replaced 7d/30d/all selector), full interactive line chart (touch to highlight, white tooltip text), goal line with label, summary strip (latest/best/avg/% goal/count), scrollable history table; mini sparkline in Today's Workout card expanded panels; accessible via "Progress Charts" in hamburger menu
+- **Logout + Session Management** — Sign Out in hamburger menu; "Stay signed in" remember-me checkbox on login; auto re-auth on JWT expiry when remember-me is set; 24h token expiry
 - **Security Hardening** — `flutter_secure_storage` replacing SharedPreferences; CORS locked to `FRONTEND_URL`; `slowapi` rate limiting on all write endpoints; session cookie `SameSite=lax`; JWT expiry reduced to 24h; default_user fallback removed
 - **Edit History Scores** — date picker on home screen; past dates use last-scheduled-workout fallback; score entry and submit work identically to today's view
 - **Fix Workout Selection Algorithm** — `/today` and `/schedule/{date}` both look backwards to last scheduled date
@@ -151,8 +143,7 @@ _Nothing in progress_
 ## 💡 Backlog
 
 ### Auth & Users
-- [ ] User profile screen (name, avatar, sign-out)
-- [ ] Sign-out functionality in Flutter app
+- [ ] User profile screen (name, avatar)
 - [ ] GitHub OAuth as a second login provider
 
 ### Mobile

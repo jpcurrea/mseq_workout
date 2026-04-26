@@ -4,16 +4,17 @@ Uses SQLAlchemy ORM with SQLite backend
 """
 
 from sqlalchemy import (
-    create_engine, 
-    Column, 
-    Integer, 
-    String, 
-    Float, 
-    Boolean, 
-    Date, 
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Float,
+    Boolean,
+    Date,
     DateTime,
     ForeignKey,
-    UniqueConstraint
+    UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import declarative_base, Session, sessionmaker, relationship
 from sqlalchemy.pool import StaticPool
@@ -60,8 +61,9 @@ class Workout(Base):
     goal = Column(Float, nullable=False)
     units = Column(String, nullable=False)
     at_park = Column(Boolean, nullable=False, default=False)
+    exercise_id = Column(String, nullable=True)  # free-exercise-db exercise id
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    
+
     # Ensure each user can't have duplicate workout names
     __table_args__ = (UniqueConstraint('user_id', 'name', name='uix_user_workout_name'),)
     
@@ -132,9 +134,16 @@ def create_engine_instance():
 
 
 def init_db():
-    """Initialize database - create all tables"""
+    """Initialize database - create all tables and run lightweight migrations."""
     engine = create_engine_instance()
     Base.metadata.create_all(engine)
+    # Add exercise_id column to workouts if upgrading from an older schema
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE workouts ADD COLUMN exercise_id TEXT"))
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
     return engine
 
 

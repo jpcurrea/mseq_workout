@@ -3,12 +3,14 @@ class Workout {
   final double goal;
   final String units;
   final bool atPark;
+  final String? exerciseId;
 
   Workout({
     required this.name,
     required this.goal,
     required this.units,
     required this.atPark,
+    this.exerciseId,
   });
 
   factory Workout.fromJson(Map<String, dynamic> json) {
@@ -17,6 +19,7 @@ class Workout {
       goal: json['goal'].toDouble(),
       units: json['units'],
       atPark: json['at_park'],
+      exerciseId: json['exercise_id'] as String?,
     );
   }
 }
@@ -28,6 +31,7 @@ class WorkoutScheduleItem {
   final String units;
   final bool atPark;
   final double goal;
+  final String? exerciseId;
 
   WorkoutScheduleItem({
     required this.date,
@@ -36,6 +40,7 @@ class WorkoutScheduleItem {
     required this.units,
     required this.atPark,
     required this.goal,
+    this.exerciseId,
   });
 
   factory WorkoutScheduleItem.fromJson(Map<String, dynamic> json) {
@@ -46,6 +51,7 @@ class WorkoutScheduleItem {
       units: json['units'],
       atPark: json['at_park'],
       goal: json['goal'].toDouble(),
+      exerciseId: json['exercise_id'] as String?,
     );
   }
 

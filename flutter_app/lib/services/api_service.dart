@@ -123,6 +123,7 @@ class ApiService {
           'goal': workout.goal,
           'units': workout.units,
           'at_park': workout.atPark,
+          if (workout.exerciseId != null) 'exercise_id': workout.exerciseId,
         }),
       );
 
@@ -173,6 +174,21 @@ class ApiService {
   static Future<List<String>> getWorkoutNames() async {
     final workouts = await getWorkouts();
     return workouts.map((w) => w.name).toList();
+  }
+
+  static Future<List<Map<String, dynamic>>> searchExercises(String query) async {
+    try {
+      final uri = Uri.parse('$baseUrl/exercises/search')
+          .replace(queryParameters: {'q': query, 'limit': '10'});
+      final response = await http.get(uri, headers: await _headers());
+      if (response.statusCode == 200) {
+        final List<dynamic> list = json.decode(response.body);
+        return list.cast<Map<String, dynamic>>();
+      }
+      return [];
+    } catch (_) {
+      return [];
+    }
   }
 
   static Future<List<Map<String, dynamic>>> getWorkoutHistory(

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/workout.dart';
 import '../services/api_service.dart';
@@ -382,12 +383,47 @@ class _AddWorkoutDialogState extends State<AddWorkoutDialog> {
   final _unitsController = TextEditingController();
   bool _atPark = false;
 
+  // Exercise autocomplete state
+  String? _exerciseId;
+  List<Map<String, dynamic>> _suggestions = [];
+  bool _loadingSuggestions = false;
+  Timer? _debounce;
+
   @override
   void dispose() {
+    _debounce?.cancel();
     _nameController.dispose();
     _goalController.dispose();
     _unitsController.dispose();
     super.dispose();
+  }
+
+  void _onNameChanged(String value) {
+    // Clear any previously linked exercise when the user edits the name
+    _exerciseId = null;
+    if (_debounce?.isActive ?? false) _debounce!.cancel();
+    if (value.trim().length < 2) {
+      setState(() => _suggestions = []);
+      return;
+    }
+    _debounce = Timer(const Duration(milliseconds: 300), () async {
+      if (!mounted) return;
+      setState(() => _loadingSuggestions = true);
+      final results = await ApiService.searchExercises(value.trim());
+      if (mounted) {
+        setState(() {
+          _suggestions = results;
+          _loadingSuggestions = false;
+        });
+      }
+    });
+  }
+
+  void _selectSuggestion(Map<String, dynamic> s) {
+    _nameController.text = s['name'] as String;
+    _exerciseId = s['id'] as String;
+    // Auto-fill units hint from primary muscles if units is still blank
+    setState(() => _suggestions = []);
   }
 
   void _submit() {
@@ -422,6 +458,7 @@ class _AddWorkoutDialogState extends State<AddWorkoutDialog> {
       goal: goal,
       units: units,
       atPark: _atPark,
+      exerciseId: _exerciseId,
     ));
   }
 
@@ -432,15 +469,68 @@ class _AddWorkoutDialogState extends State<AddWorkoutDialog> {
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             TextField(
               controller: _nameController,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Workout Name',
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
+                suffixIcon: _exerciseId != null
+                    ? const Icon(Icons.link, color: Colors.green, size: 18)
+                    : null,
               ),
               autofocus: true,
+              onChanged: _onNameChanged,
             ),
+            // Suggestion dropdown
+            if (_loadingSuggestions)
+              const LinearProgressIndicator(minHeight: 2),
+            if (_suggestions.isNotEmpty)
+              Container(
+                constraints: const BoxConstraints(maxHeight: 200),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade300),
+                  borderRadius: const BorderRadius.vertical(
+                      bottom: Radius.circular(4)),
+                  color: Theme.of(context).colorScheme.surface,
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.black12,
+                        blurRadius: 4,
+                        offset: const Offset(0, 2))
+                  ],
+                ),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  padding: EdgeInsets.zero,
+                  itemCount: _suggestions.length,
+                  itemBuilder: (_, i) {
+                    final s = _suggestions[i];
+                    final muscles =
+                        (s['primaryMuscles'] as List?)?.join(', ') ?? '';
+                    return InkWell(
+                      onTap: () => _selectSuggestion(s),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(s['name'] as String,
+                                style: const TextStyle(fontSize: 13)),
+                            if (muscles.isNotEmpty)
+                              Text(muscles,
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600)),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
             const SizedBox(height: 12),
             TextField(
               controller: _goalController,
