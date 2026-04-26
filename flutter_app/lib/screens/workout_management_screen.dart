@@ -404,15 +404,10 @@ class _ManageHistoryLoaderState extends State<_ManageHistoryLoader> {
         child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
       );
     }
-    if (_history == null || _history!.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.only(top: 4, bottom: 8),
-        child: Text('No scored entries yet.',
-            style: TextStyle(color: Colors.black45, fontSize: 13)),
-      );
-    }
+    // Always render the panel (it shows image + chart); if history is empty
+    // the panel shows just the image and a "no entries" message.
     return WorkoutHistoryPanel(
-      history: _history!,
+      history: _history ?? [],
       units: widget.workout.units,
       goal: widget.workout.goal,
       exerciseId: widget.workout.exerciseId,

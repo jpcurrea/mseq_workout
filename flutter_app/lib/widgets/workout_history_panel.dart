@@ -31,9 +31,17 @@ class WorkoutHistoryPanel extends StatelessWidget {
         else
           const Text('(no exercise linked)', style: TextStyle(fontSize: 10, color: Colors.grey)),
         const SizedBox(height: 8),
-        SizedBox(height: 150, child: WorkoutMiniLineChart(entries: chrono, goal: goal)),
-        const SizedBox(height: 12),
-        WorkoutRecentTable(entries: recent, units: units),
+        if (history.isEmpty)
+          const Padding(
+            padding: EdgeInsets.only(top: 4, bottom: 8),
+            child: Text('No scored entries yet.',
+                style: TextStyle(color: Colors.black45, fontSize: 13)),
+          )
+        else ...[
+          SizedBox(height: 150, child: WorkoutMiniLineChart(entries: chrono, goal: goal)),
+          const SizedBox(height: 12),
+          WorkoutRecentTable(entries: recent, units: units),
+        ],
       ],
     );
   }
