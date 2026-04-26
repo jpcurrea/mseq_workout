@@ -261,7 +261,7 @@ class _WorkoutManagementScreenState extends State<WorkoutManagementScreen> {
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 0),
       child: ExpansionTile(
         tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+        childrenPadding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
         leading: CircleAvatar(
           radius: 16,
           backgroundColor: originalWorkout.atPark ? Colors.green : Colors.blue,

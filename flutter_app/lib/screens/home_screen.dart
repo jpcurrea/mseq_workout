@@ -570,18 +570,12 @@ class _WorkoutCardState extends State<_WorkoutCard> {
                     padding: EdgeInsets.all(16),
                     child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
                   )
-                : _history == null || _history!.isEmpty
-                    ? const Padding(
-                        padding: EdgeInsets.all(8),
-                        child: Text('No scored entries yet.',
-                            style: TextStyle(color: Colors.black45, fontSize: 13)),
-                      )
-                    : WorkoutHistoryPanel(
-                        history: _history!,
-                        units: workout.units,
-                        goal: workout.goal,
-                        exerciseId: workout.exerciseId,
-                      ),
+                : WorkoutHistoryPanel(
+                    history: _history ?? [],
+                    units: workout.units,
+                    goal: workout.goal,
+                    exerciseId: workout.exerciseId,
+                  ),
           ),
         ],
       ),
