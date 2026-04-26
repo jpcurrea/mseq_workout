@@ -405,12 +405,15 @@ def mseq(baseVal, powerVal, shift=1, whichSeq=1, raw=False):
                  [1,1,4,2]]
         else:
             print ('M-sequence %d**%d is not defined'%(baseVal,powerVal))
-    elif baseVal==5:
+    elif baseVal==9:
         if powerVal==2:
             tap=[[1,1],
                  [1,2]]
         else:
             print ('M-sequence %d**%d is not defined'%(baseVal,powerVal))
+
+    if 'tap' not in locals():
+        raise ValueError('M-sequence %d**%d is not defined' % (baseVal, powerVal))
 
     ms=np.zeros([bitNum])
 
@@ -418,7 +421,6 @@ def mseq(baseVal, powerVal, shift=1, whichSeq=1, raw=False):
         whichSeq = np.ceil(np.random.rand(1)*len(tap))
     else:
         if (whichSeq > len(tap)) or (whichSeq < 1):
-            print (' wrapping arround!')
             whichSeq = (whichSeq%len(tap)) + 1
 
     weights=np.zeros([powerVal])

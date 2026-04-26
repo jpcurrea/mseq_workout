@@ -15,6 +15,25 @@ class ApiService {
     };
   }
 
+  static Exception _httpException(http.Response response, String fallbackMessage) {
+    String message = '$fallbackMessage: ${response.statusCode}';
+    try {
+      final error = json.decode(response.body);
+      if (error is Map<String, dynamic> && error['detail'] != null) {
+        message = error['detail'].toString();
+      }
+    } catch (_) {}
+    return Exception(message);
+  }
+
+  static Exception _networkException(Object e) {
+    final msg = e.toString();
+    if (msg.startsWith('Exception: ')) {
+      return Exception(msg.replaceFirst('Exception: ', ''));
+    }
+    return Exception('Network error: $e');
+  }
+
   static Future<List<Workout>> getWorkouts() async {
     try {
       final response = await http.get(
@@ -82,10 +101,10 @@ class ApiService {
       );
 
       if (response.statusCode != 200) {
-        throw Exception('Failed to update score: ${response.statusCode}');
+        throw _httpException(response, 'Failed to update score');
       }
     } catch (e) {
-      throw Exception('Network error: $e');
+      throw _networkException(e);
     }
   }
 
@@ -112,10 +131,10 @@ class ApiService {
       if (response.statusCode == 200) {
         return json.decode(response.body);
       } else {
-        throw Exception('Failed to generate routine: ${response.statusCode}');
+        throw _httpException(response, 'Failed to generate routine');
       }
     } catch (e) {
-      throw Exception('Network error: $e');
+      throw _networkException(e);
     }
   }
 
@@ -138,9 +157,9 @@ class ApiService {
       if (response.statusCode == 200) {
         return json.decode(response.body) as Map<String, dynamic>;
       }
-      throw Exception('Failed to load schedule stats: ${response.statusCode}');
+      throw _httpException(response, 'Failed to load schedule stats');
     } catch (e) {
-      throw Exception('Network error: $e');
+      throw _networkException(e);
     }
   }
 
@@ -159,11 +178,10 @@ class ApiService {
       );
 
       if (response.statusCode != 200) {
-        final error = json.decode(response.body);
-        throw Exception(error['detail'] ?? 'Failed to create workout');
+        throw _httpException(response, 'Failed to create workout');
       }
     } catch (e) {
-      throw Exception('Network error: $e');
+      throw _networkException(e);
     }
   }
 
@@ -176,25 +194,21 @@ class ApiService {
     bool exerciseIdProvided = false,
     String? newName,
   }) async {
-    try {
-      final body = <String, dynamic>{
-        'goal': goal,
-        'units': units,
-        'at_park': atPark,
-        if (exerciseIdProvided) 'exercise_id': exerciseId,
-        if (newName != null && newName.isNotEmpty) 'new_name': newName,
-      };
-      final response = await http.put(
-        Uri.parse('$baseUrl/workouts/$workoutName'),
-        headers: await _headers(),
-        body: json.encode(body),
-      );
+    final body = <String, dynamic>{
+      'goal': goal,
+      'units': units,
+      'at_park': atPark,
+      if (exerciseIdProvided) 'exercise_id': exerciseId,
+      if (newName != null && newName.isNotEmpty) 'new_name': newName,
+    };
+    final response = await http.put(
+      Uri.parse('$baseUrl/workouts/$workoutName'),
+      headers: await _headers(),
+      body: json.encode(body),
+    );
 
-      if (response.statusCode != 200) {
-        throw Exception('Failed to update workout: ${response.statusCode}');
-      }
-    } catch (e) {
-      throw Exception('Network error: $e');
+    if (response.statusCode != 200) {
+      throw _httpException(response, 'Failed to update workout');
     }
   }
 
@@ -206,10 +220,10 @@ class ApiService {
       );
 
       if (response.statusCode != 200) {
-        throw Exception('Failed to delete workout: ${response.statusCode}');
+        throw _httpException(response, 'Failed to delete workout');
       }
     } catch (e) {
-      throw Exception('Network error: $e');
+      throw _networkException(e);
     }
   }
 
@@ -249,10 +263,10 @@ class ApiService {
         final List<dynamic> list = json.decode(response.body);
         return list.cast<Map<String, dynamic>>();
       } else {
-        throw Exception('Failed to load history: ${response.statusCode}');
+        throw _httpException(response, 'Failed to load history');
       }
     } catch (e) {
-      throw Exception('Network error: $e');
+      throw _networkException(e);
     }
   }
 
@@ -268,9 +282,9 @@ class ApiService {
       if (response.statusCode == 200) {
         return json.decode(response.body) as Map<String, dynamic>;
       }
-      throw Exception('Failed to load interval distribution: ${response.statusCode}');
+      throw _httpException(response, 'Failed to load interval distribution');
     } catch (e) {
-      throw Exception('Network error: $e');
+      throw _networkException(e);
     }
   }
 }

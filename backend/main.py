@@ -33,6 +33,12 @@ from jose import jwt, JWTError
 _EXERCISES: list = []
 _EXERCISES_IDX: dict = {}
 MSEQ_BASE_DEFAULT = 5
+SUPPORTED_MSEQ_POWERS_BY_BASE = {
+    2: set(range(2, 31)),
+    3: set(range(2, 8)),
+    5: {2, 3, 4},
+    9: {2},
+}
 
 def _load_exercises():
     global _EXERCISES, _EXERCISES_IDX
@@ -138,6 +144,13 @@ def _validate_generation_params(
         raise HTTPException(status_code=422, detail="minimum_interval_days must be between 1 and 14")
     if mseq_base not in (2, 3, 5, 9):
         raise HTTPException(status_code=422, detail="mseq_base must be 2, 3, 5, or 9")
+    allowed_powers = SUPPORTED_MSEQ_POWERS_BY_BASE[mseq_base]
+    if sequence_power not in allowed_powers:
+        allowed_sorted = ", ".join(str(p) for p in sorted(allowed_powers))
+        raise HTTPException(
+            status_code=422,
+            detail=f"sequence_power={sequence_power} is unsupported for mseq_base={mseq_base}. Allowed powers: {allowed_sorted}",
+        )
     if active_symbols < 1 or active_symbols > (mseq_base - 1):
         raise HTTPException(
             status_code=422,
@@ -182,7 +195,10 @@ def _compute_mseq_rate_stats(
     daily_workout_load = [0 for _ in range(schedule_span_days)]
 
     for num in range(workout_count):
-        seq = mseq(mseq_base, sequence_power, whichSeq=num, shift=0, raw=True)
+        try:
+            seq = mseq(mseq_base, sequence_power, whichSeq=num + 1, shift=0, raw=True)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
         indices = [i for i in range(num_frames) if 1 <= int(seq[i]) <= active_symbols]
 
         count = len(indices)
@@ -535,7 +551,10 @@ async def generate_new_routine(request: Request, request_body: RoutineGeneration
     new_entries = []
     for num, workout in enumerate(workouts):
         shift = np.random.randint(0, num_frames - 1)
-        seq = mseq(mseq_base, sequence_power, whichSeq=num, shift=shift, raw=True)
+        try:
+            seq = mseq(mseq_base, sequence_power, whichSeq=num + 1, shift=shift, raw=True)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
         for i in range(num_frames):
             if 1 <= int(seq[i]) <= active_symbols:
                 new_entries.append(ScheduleEntry(

@@ -27,6 +27,17 @@ class _WorkoutManagementScreenState extends State<WorkoutManagementScreen> {
   String? _scheduleStatsError;
   Map<String, dynamic>? _scheduleStats;
 
+  static const Map<int, List<int>> _supportedPowersByBase = {
+    2: [2, 3, 4, 5, 6],
+    3: [2, 3, 4, 5, 6],
+    5: [2, 3, 4],
+    9: [2],
+  };
+
+  List<int> _powerOptionsForCurrentBase() {
+    return _supportedPowersByBase[_mseqBase] ?? const [2, 3, 4, 5, 6];
+  }
+
   @override
   void initState() {
     super.initState();
@@ -334,7 +345,7 @@ class _WorkoutManagementScreenState extends State<WorkoutManagementScreen> {
                         labelText: 'Sequence power',
                         border: OutlineInputBorder(),
                       ),
-                      items: const [2, 3, 4, 5, 6]
+                      items: _powerOptionsForCurrentBase()
                           .map(
                             (p) => DropdownMenuItem(
                               value: p,
@@ -403,6 +414,10 @@ class _WorkoutManagementScreenState extends State<WorkoutManagementScreen> {
                             if (value == null) return;
                             setState(() {
                               _mseqBase = value;
+                              final powerOptions = _powerOptionsForCurrentBase();
+                              if (!powerOptions.contains(_sequencePower)) {
+                                _sequencePower = powerOptions.last;
+                              }
                               if (_activeSymbols > _mseqBase - 1) {
                                 _activeSymbols = _mseqBase - 1;
                               }
