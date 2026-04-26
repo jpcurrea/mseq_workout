@@ -8,7 +8,6 @@ import 'services/auth_service.dart';
 import 'services/api_service.dart';
 
 void main() {
-  printTokenForExport(); // TEMP: Print JWT token for /export
   runApp(const WorkoutApp());
 }
 

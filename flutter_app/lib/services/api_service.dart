@@ -214,10 +214,3 @@ class ApiService {
     }
   }
 }
-
-// TEMP: Print JWT token at startup for export
-void printTokenForExport() async {
-  final token = await AuthService.getToken();
-  print('JWT token for /export:');
-  print(token);
-}

@@ -237,7 +237,7 @@ async def get_workouts(user_id: int = Depends(get_current_user_id), session: Ses
 
 @app.get("/today", response_model=List[WorkoutScheduleItem])
 async def get_today_workouts(user_id: int = Depends(get_current_user_id), session: Session = Depends(get_session)):
-    """Get today's workouts, or the most recent past day if none scheduled today."""
+    """Get today's workouts. Falls back to most recent past day, then nearest future day."""
     today = datetime.date.today()
 
     entries = (
@@ -249,17 +249,25 @@ async def get_today_workouts(user_id: int = Depends(get_current_user_id), sessio
     )
 
     if not entries:
-        latest = (
+        fallback = (
             session.query(ScheduleEntry.date)
             .filter(ScheduleEntry.user_id == user_id, ScheduleEntry.date < today)
             .order_by(ScheduleEntry.date.desc())
             .first()
         )
-        if latest:
+        if not fallback:
+            # Nothing in the past — find the next upcoming date
+            fallback = (
+                session.query(ScheduleEntry.date)
+                .filter(ScheduleEntry.user_id == user_id, ScheduleEntry.date > today)
+                .order_by(ScheduleEntry.date.asc())
+                .first()
+            )
+        if fallback:
             entries = (
                 session.query(ScheduleEntry, Workout)
                 .join(Workout, ScheduleEntry.workout_id == Workout.id)
-                .filter(ScheduleEntry.user_id == user_id, ScheduleEntry.date == latest.date)
+                .filter(ScheduleEntry.user_id == user_id, ScheduleEntry.date == fallback.date)
                 .order_by(Workout.at_park)
                 .all()
             )
@@ -294,17 +302,25 @@ async def get_workouts_for_date(date: str, user_id: int = Depends(get_current_us
     )
 
     if not entries:
-        latest = (
+        fallback = (
             session.query(ScheduleEntry.date)
             .filter(ScheduleEntry.user_id == user_id, ScheduleEntry.date < target_date)
             .order_by(ScheduleEntry.date.desc())
             .first()
         )
-        if latest:
+        if not fallback:
+            # Nothing in the past — find the next upcoming date
+            fallback = (
+                session.query(ScheduleEntry.date)
+                .filter(ScheduleEntry.user_id == user_id, ScheduleEntry.date > target_date)
+                .order_by(ScheduleEntry.date.asc())
+                .first()
+            )
+        if fallback:
             entries = (
                 session.query(ScheduleEntry, Workout)
                 .join(Workout, ScheduleEntry.workout_id == Workout.id)
-                .filter(ScheduleEntry.user_id == user_id, ScheduleEntry.date == latest.date)
+                .filter(ScheduleEntry.user_id == user_id, ScheduleEntry.date == fallback.date)
                 .order_by(Workout.at_park)
                 .all()
             )

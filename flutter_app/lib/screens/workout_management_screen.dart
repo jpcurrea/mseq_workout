@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/workout.dart';
 import '../services/api_service.dart';
+import '../widgets/workout_history_panel.dart';
 
 class WorkoutManagementScreen extends StatefulWidget {
   const WorkoutManagementScreen({super.key});
@@ -258,97 +259,168 @@ class _WorkoutManagementScreenState extends State<WorkoutManagementScreen> {
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 0),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+        leading: CircleAvatar(
+          radius: 16,
+          backgroundColor: originalWorkout.atPark ? Colors.green : Colors.blue,
+          child: Icon(
+            originalWorkout.atPark ? Icons.park : Icons.home,
+            color: Colors.white,
+            size: 16,
+          ),
+        ),
+        title: Text(
+          originalWorkout.name,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+        ),
+        subtitle: Text(
+          'Goal: ${originalWorkout.goal} ${originalWorkout.units}',
+          style: const TextStyle(fontSize: 12, color: Colors.black54),
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    originalWorkout.name,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 18,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.delete, color: Colors.red),
-                  onPressed: isSaving ? null : () => _deleteWorkout(index),
-                  tooltip: 'Delete',
-                ),
-              ],
+            IconButton(
+              icon: const Icon(Icons.delete, color: Colors.red),
+              onPressed: isSaving ? null : () => _deleteWorkout(index),
+              tooltip: 'Delete',
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
             ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  flex: 2,
-                  child: TextField(
-                    controller: controllers.goalController,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Goal',
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  flex: 2,
-                  child: TextField(
-                    controller: controllers.unitsController,
-                    decoration: const InputDecoration(
-                      labelText: 'Units',
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  flex: 2,
-                  child: DropdownButtonFormField<bool>(
-                    initialValue: controllers.atPark,
-                    decoration: const InputDecoration(
-                      labelText: 'Location',
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      isDense: true,
-                    ),
-                    items: const [
-                      DropdownMenuItem(value: false, child: Text('Home')),
-                      DropdownMenuItem(value: true, child: Text('Park')),
-                    ],
-                    onChanged: (value) {
-                      setState(() {
-                        controllers.atPark = value ?? false;
-                      });
-                    },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: isSaving ? null : () => _saveWorkout(index),
-                icon: const Icon(Icons.save, size: 18),
-                label: const Text('Save Changes'),
-              ),
-            ),
+            const Icon(Icons.expand_more),
           ],
         ),
+        children: [
+          // Edit fields
+          Row(
+            children: [
+              Expanded(
+                flex: 2,
+                child: TextField(
+                  controller: controllers.goalController,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Goal',
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                flex: 2,
+                child: TextField(
+                  controller: controllers.unitsController,
+                  decoration: const InputDecoration(
+                    labelText: 'Units',
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                flex: 2,
+                child: DropdownButtonFormField<bool>(
+                  initialValue: controllers.atPark,
+                  decoration: const InputDecoration(
+                    labelText: 'Location',
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    isDense: true,
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: false, child: Text('Home')),
+                    DropdownMenuItem(value: true, child: Text('Park')),
+                  ],
+                  onChanged: (value) {
+                    setState(() => controllers.atPark = value ?? false);
+                  },
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: isSaving ? null : () => _saveWorkout(index),
+              icon: const Icon(Icons.save, size: 18),
+              label: const Text('Save Changes'),
+            ),
+          ),
+          const Divider(height: 24),
+          // History panel — loads lazily when tile expands
+          _ManageHistoryLoader(workoutName: originalWorkout.name, workout: originalWorkout),
+        ],
       ),
     );
   }
 }
+
+// ─── Lazy history loader for manage screen ────────────────────────────────────
+
+class _ManageHistoryLoader extends StatefulWidget {
+  final String workoutName;
+  final Workout workout;
+
+  const _ManageHistoryLoader({required this.workoutName, required this.workout});
+
+  @override
+  State<_ManageHistoryLoader> createState() => _ManageHistoryLoaderState();
+}
+
+class _ManageHistoryLoaderState extends State<_ManageHistoryLoader> {
+  List<Map<String, dynamic>>? _history;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final data = await ApiService.getWorkoutHistory(widget.workoutName, limit: 20);
+      if (mounted) setState(() { _history = data; });
+    } catch (_) {
+      if (mounted) setState(() { _history = []; });
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
+    if (_history == null || _history!.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 4, bottom: 8),
+        child: Text('No scored entries yet.',
+            style: TextStyle(color: Colors.black45, fontSize: 13)),
+      );
+    }
+    return WorkoutHistoryPanel(
+      history: _history!,
+      units: widget.workout.units,
+      goal: widget.workout.goal,
+      exerciseId: widget.workout.exerciseId,
+    );
+  }
+}
+
+// ─── Edit controllers ─────────────────────────────────────────────────────────
 
 class WorkoutEditControllers {
   final TextEditingController nameController;
