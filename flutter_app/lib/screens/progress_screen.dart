@@ -328,37 +328,41 @@ class _ProgressChartState extends State<_ProgressChart> {
         (visibleSpan / 4).ceilToDouble().clamp(1.0, double.infinity);
     final yInterval = (maxY / 4).ceilToDouble().clamp(1.0, double.infinity);
 
-    return GestureDetector(
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        final chartPixelWidth = constraints.maxWidth;
+        return GestureDetector(
       onScaleStart: (details) {
         _scaleStartMin = viewMinX;
         _scaleStartMax = viewMaxX;
         _panStartFocal = details.localFocalPoint;
       },
       onScaleUpdate: (details) {
-        if (_scaleStartMin == null || _scaleStartMax == null) return;
+        if (_scaleStartMin == null || _scaleStartMax == null || _panStartFocal == null) return;
         final startSpan = _scaleStartMax! - _scaleStartMin!;
+        // Zoom: new span anchored at start focal point
         final newSpan = (startSpan / details.scale).clamp(7.0, totalMaxX);
-        final center = (_scaleStartMin! + _scaleStartMax!) / 2;
-        // Also account for panning by tracking focal point movement
-        double panDelta = 0;
-        if (_panStartFocal != null && details.scale == 1.0) {
-          // Pure pan: map pixel delta to data units
-          // We'll handle this in render size context
-        }
-        var newMin = center - newSpan / 2;
-        var newMax = center + newSpan / 2;
+        final focalFraction = (_panStartFocal!.dx / chartPixelWidth).clamp(0.0, 1.0);
+        final focalDataX = _scaleStartMin! + focalFraction * startSpan;
+        var newMin = focalDataX - focalFraction * newSpan;
+        var newMax = newMin + newSpan;
+        // Pan: map focal point pixel delta to data units
+        final dataPerPixel = startSpan / chartPixelWidth;
+        final focalDxPixels = details.localFocalPoint.dx - _panStartFocal!.dx;
+        newMin -= focalDxPixels * dataPerPixel;
+        newMax -= focalDxPixels * dataPerPixel;
         // Clamp to valid range
         if (newMin < 0) {
-          newMax = (newMax - newMin).clamp(newSpan, totalMaxX);
+          newMax -= newMin;
           newMin = 0;
         }
         if (newMax > totalMaxX) {
-          newMin = (newMin - (newMax - totalMaxX)).clamp(0, totalMaxX - newSpan);
+          newMin -= (newMax - totalMaxX);
           newMax = totalMaxX;
         }
         setState(() {
-          _viewMinX = newMin;
-          _viewMaxX = newMax;
+          _viewMinX = newMin.clamp(0.0, totalMaxX - newSpan);
+          _viewMaxX = newMax.clamp(newSpan, totalMaxX);
         });
       },
       child: LineChart(
@@ -454,8 +458,8 @@ class _ProgressChartState extends State<_ProgressChart> {
                   : s.y.toStringAsFixed(1);
               return LineTooltipItem(
                 '$dateStr\n$scoreStr ${widget.units}',
-                TextStyle(
-                  color: color,
+                const TextStyle(
+                  color: Colors.white,
                   fontWeight: FontWeight.bold,
                   fontSize: 12,
                 ),
@@ -500,6 +504,8 @@ class _ProgressChartState extends State<_ProgressChart> {
       ),
     ),  // closes LineChart
   );    // closes GestureDetector
+      },    // closes LayoutBuilder.builder
+    );      // closes LayoutBuilder
   }
 }
 

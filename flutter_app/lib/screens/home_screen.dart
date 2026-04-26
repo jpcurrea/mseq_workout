@@ -704,6 +704,26 @@ class _MiniLineChart extends StatelessWidget {
             ),
           ],
         ),
+        lineTouchData: LineTouchData(
+          touchTooltipData: LineTouchTooltipData(
+            getTooltipItems: (touchSpots) => touchSpots.map((s) {
+              final d = firstDate.add(Duration(days: s.x.toInt()));
+              final dateStr = DateFormat('MMM d').format(d);
+              final scoreStr = s.y == s.y.truncateToDouble()
+                  ? s.y.toInt().toString()
+                  : s.y.toStringAsFixed(1);
+              return LineTooltipItem(
+                '$dateStr\n$scoreStr',
+                const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 11,
+                ),
+              );
+            }).toList(),
+          ),
+          handleBuiltInTouches: true,
+        ),
         lineBarsData: [
           LineChartBarData(
             spots: spots,
