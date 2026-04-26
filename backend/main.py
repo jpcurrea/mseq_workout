@@ -26,6 +26,7 @@ from database import init_db, get_session, create_session, User, Workout, Schedu
 from auth import router as auth_router, SECRET_KEY, ALGORITHM
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from jose import jwt, JWTError
 
 # ── Exercise database ──────────────────────────────────────────────────────────
@@ -633,12 +634,25 @@ async def update_workout(request: Request, workout_name: str, workout: WorkoutUp
         raise HTTPException(status_code=404, detail="Workout not found")
 
     if workout.new_name and workout.new_name.strip():
-        existing.name = workout.new_name.strip()
+        new_name = workout.new_name.strip()
+        if new_name != existing.name:
+            duplicate = session.query(Workout).filter(
+                Workout.user_id == user_id,
+                Workout.name == new_name,
+                Workout.id != existing.id,
+            ).first()
+            if duplicate:
+                raise HTTPException(status_code=400, detail="Workout with this name already exists")
+        existing.name = new_name
     existing.goal = workout.goal
     existing.units = workout.units
     existing.at_park = workout.at_park
     existing.exercise_id = workout.exercise_id
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(status_code=400, detail="Workout with this name already exists")
     return {"message": "Workout updated successfully"}
 
 @app.delete("/workouts/{workout_name}")
