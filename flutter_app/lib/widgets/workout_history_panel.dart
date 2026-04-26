@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
@@ -47,42 +48,70 @@ class WorkoutHistoryPanel extends StatelessWidget {
   }
 }
 
-// ─── Exercise reference image ─────────────────────────────────────────────────
+// ─── Exercise reference image (animated: alternates between frame 0 and 1) ────
 
-class WorkoutExerciseImage extends StatelessWidget {
+class WorkoutExerciseImage extends StatefulWidget {
   final String exerciseId;
 
   const WorkoutExerciseImage({super.key, required this.exerciseId});
 
+  @override
+  State<WorkoutExerciseImage> createState() => _WorkoutExerciseImageState();
+}
+
+class _WorkoutExerciseImageState extends State<WorkoutExerciseImage> {
   static const _base =
       'https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises';
+  static const _height = 180.0;
+
+  int _frame = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 900), (_) {
+      if (mounted) setState(() => _frame = _frame == 0 ? 1 : 0);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final url = '$_base/${widget.exerciseId}/$_frame.jpg';
     return ClipRRect(
       borderRadius: BorderRadius.circular(6),
-      child: Image.network(
-        '$_base/$exerciseId/0.jpg',
-        height: 140,
-        width: double.infinity,
-        fit: BoxFit.cover,
-        loadingBuilder: (_, child, progress) => progress == null
-            ? child
-            : const SizedBox(
-                height: 140,
-                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-              ),
-        errorBuilder: (_, __, ___) => Container(
-              height: 140,
-              color: Colors.grey.shade200,
-              child: Center(
-                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  const Icon(Icons.broken_image, color: Colors.grey),
-                  Text('No image: $exerciseId',
-                      style: const TextStyle(fontSize: 10, color: Colors.grey)),
-                ]),
-              ),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 300),
+        child: Image.network(
+          url,
+          key: ValueKey(url),
+          height: _height,
+          width: double.infinity,
+          fit: BoxFit.contain,
+          loadingBuilder: (_, child, progress) => progress == null
+              ? child
+              : SizedBox(
+                  height: _height,
+                  child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                ),
+          errorBuilder: (_, __, ___) => Container(
+            height: _height,
+            color: Colors.grey.shade200,
+            child: Center(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.broken_image, color: Colors.grey),
+                Text('No image: ${widget.exerciseId}',
+                    style: const TextStyle(fontSize: 10, color: Colors.grey)),
+              ]),
             ),
+          ),
+        ),
       ),
     );
   }
