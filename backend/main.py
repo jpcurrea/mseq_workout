@@ -34,7 +34,10 @@ _EXERCISES_IDX: dict = {}
 
 def _load_exercises():
     global _EXERCISES, _EXERCISES_IDX
+    # Try data dir first (persistent disk), then fall back to the repo path beside main.py
     path = os.path.join(get_data_dir(), "exercises.json")
+    if not os.path.exists(path):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "exercises.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             _EXERCISES = json.load(f)
