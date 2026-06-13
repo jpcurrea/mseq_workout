@@ -8,3 +8,8 @@ build/
 .env
 client_secret_703200533490-37fsulr5negs10sjj2vfo9evgfus1tdi.apps.googleusercontent.com.json
 backend/oauth_clientID.txt
+
+# Personal grant / career-planning materials
+/*.pdf
+career_plan_*.csv
+backend/main_old.py

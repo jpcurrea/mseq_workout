@@ -1,0 +1,1059 @@
+"""
+Task management routes: tasks, tags, work sessions, plans, and analytics.
+"""
+import datetime
+import csv
+import io
+import math
+import re
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
+from pydantic import BaseModel
+from sqlalchemy.orm import Session, selectinload
+
+from database import (
+    get_session,
+    Task,
+    Tag,
+    WorkSession,
+    Plan,
+    Project,
+    ProjectMembership,
+    task_tag_link,
+)
+from dependencies import get_current_user_id
+
+tasks_router = APIRouter(prefix="/tasks", tags=["tasks"])
+plans_router = APIRouter(prefix="/plans", tags=["plans"])
+
+
+def _assert_project_member(project_id: int, user_id: int, session: Session):
+    """Raise 403 if the user is not a member of the project."""
+    m = session.query(ProjectMembership).filter(
+        ProjectMembership.project_id == project_id,
+        ProjectMembership.user_id == user_id,
+    ).first()
+    if not m:
+        raise HTTPException(status_code=403, detail="Not a member of this project")
+    return m
+
+
+def _assert_can_write(project_id: int, user_id: int, session: Session):
+    """Raise 403 if the user has viewer-only access."""
+    m = _assert_project_member(project_id, user_id, session)
+    if m.role == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer role cannot modify tasks")
+
+# ── Urgency constants ──────────────────────────────────────────────────────────
+
+# Time window over which pre-deadline urgency ramps 0→1
+_URGENCY_HORIZON_MINUTES = 7 * 24 * 60  # 7 days
+
+
+# ── Urgency helpers ────────────────────────────────────────────────────────────
+
+def _start_by(task: Task) -> Optional[datetime.datetime]:
+    if task.due_date is None:
+        return None
+    if task.duration_minutes:
+        return task.due_date - datetime.timedelta(minutes=task.duration_minutes)
+    return task.due_date
+
+
+def _own_urgency(task: Task, now: datetime.datetime) -> float:
+    """Urgency [0, 1] based on this task's deadline only.
+
+    • 0   – no deadline, or completed
+    • 0→1 – pre-deadline: ramps linearly over URGENCY_HORIZON
+    • 1   – overdue (start_by <= now)
+    """
+    if task.is_completed or task.due_date is None:
+        return 0.0
+    sb = _start_by(task)
+    if sb is None:
+        return 0.0
+    time_remaining = (sb - now).total_seconds() / 60.0
+    if time_remaining <= 0:
+        return 1.0
+    return 1.0 - min(time_remaining / _URGENCY_HORIZON_MINUTES, 1.0)
+
+
+def _tree_urgency(task: Task, now: datetime.datetime) -> float:
+    """Max urgency across this task and all descendants."""
+    own = _own_urgency(task, now)
+    if not task.subtasks:
+        return own
+    return max(own, *[_tree_urgency(st, now) for st in task.subtasks])
+
+
+def _actual_duration_minutes(task: Task) -> Optional[float]:
+    completed = [s for s in task.work_sessions if s.ended_at is not None]
+    if not completed:
+        return None
+    return sum(
+        (s.ended_at - s.started_at).total_seconds() / 60.0 for s in completed
+    )
+
+
+def _serialize_task(task: Task, now: datetime.datetime) -> Dict[str, Any]:
+    """Recursively serialize a Task (loads subtasks via relationship)."""
+    return {
+        "id": task.id,
+        "project_id": task.project_id,
+        "title": task.title,
+        "description": task.description,
+        "due_date": task.due_date.isoformat() if task.due_date else None,
+        "duration_minutes": task.duration_minutes,
+        "start_by": _start_by(task).isoformat() if _start_by(task) else None,
+        "is_completed": task.is_completed,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        "is_recurring": task.is_recurring,
+        "recurrence_rule": task.recurrence_rule,
+        "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in task.tags],
+        "subtasks": [_serialize_task(st, now) for st in task.subtasks],
+        "urgency_score": _tree_urgency(task, now),
+        "actual_duration_minutes": _actual_duration_minutes(task),
+        "parent_task_id": task.parent_task_id,
+        "created_at": task.created_at.isoformat(),
+        "updated_at": task.updated_at.isoformat() if task.updated_at else task.created_at.isoformat(),
+    }
+
+
+def _load_task(task_id: int, user_id: int, session: Session) -> Task:
+    task = (
+        session.query(Task)
+        .filter(Task.id == task_id)
+        .options(selectinload(Task.tags), selectinload(Task.work_sessions))
+        .first()
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    # Verify user is a member of the task's project
+    _assert_project_member(task.project_id, user_id, session)
+    return task
+
+
+def _next_due_date(due_date: datetime.datetime, rule: str) -> datetime.datetime:
+    rule = rule.upper()
+    if rule == "DAILY":
+        return due_date + datetime.timedelta(days=1)
+    if rule == "WEEKLY":
+        return due_date + datetime.timedelta(weeks=1)
+    if rule == "MONTHLY":
+        month = due_date.month + 1
+        year = due_date.year
+        if month > 12:
+            month, year = 1, year + 1
+        return due_date.replace(year=year, month=month)
+    return due_date + datetime.timedelta(days=1)
+
+
+def _norm_col(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").strip().lower())
+
+
+def _csv_get(row: Dict[str, Any], aliases: set[str]) -> Optional[str]:
+    for key, value in row.items():
+        if _norm_col(str(key)) in aliases:
+            text = "" if value is None else str(value).strip()
+            if text:
+                return text
+    return None
+
+
+def _parse_due_date(value: str) -> Optional[datetime.datetime]:
+    val = (value or "").strip()
+    if not val:
+        return None
+
+    normalized = val.replace("Z", "+00:00")
+    try:
+        return datetime.datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y"):
+        try:
+            return datetime.datetime.strptime(val, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_duration_minutes(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    val = value.strip().lower()
+    if not val:
+        return None
+
+    # Org-mode effort often appears as H:MM
+    hm = re.fullmatch(r"(\d{1,3}):(\d{1,2})", val)
+    if hm:
+        return int(hm.group(1)) * 60 + int(hm.group(2))
+
+    # Plain number is interpreted as minutes
+    if re.fullmatch(r"\d+(\.\d+)?", val):
+        return int(round(float(val)))
+
+    # Supports variants like "1h 30m", "2 hours", "45 min"
+    unit_match = re.fullmatch(
+        r"\s*(?:(\d+(?:\.\d+)?)\s*h(?:ours?)?)?\s*(?:(\d+(?:\.\d+)?)\s*m(?:in(?:utes?)?)?)?\s*",
+        val,
+    )
+    if unit_match and (unit_match.group(1) or unit_match.group(2)):
+        hours = float(unit_match.group(1) or 0)
+        mins = float(unit_match.group(2) or 0)
+        return int(round(hours * 60 + mins))
+
+    return None
+
+
+def _parse_tags(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    text = value.strip()
+    if not text:
+        return []
+
+    # Org-style tags: :work:deep:
+    if text.startswith(":") and text.endswith(":"):
+        parts = [p.strip() for p in text.split(":") if p.strip()]
+    else:
+        parts = [p.strip() for p in re.split(r"[,;|]", text) if p.strip()]
+
+    seen = set()
+    deduped = []
+    for p in parts:
+        key = p.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(p)
+    return deduped
+
+
+CSV_TITLE_ALIASES = {"title", "task", "name", "heading", "todo", "summary", "item"}
+CSV_DESC_ALIASES = {"description", "notes", "detail", "body"}
+CSV_DUE_ALIASES = {"duedate", "due", "deadline", "scheduled", "date"}
+CSV_DURATION_ALIASES = {"duration", "durationminutes", "estimate", "effort", "minutes", "time"}
+CSV_STATUS_ALIASES = {"status", "state", "done", "completed", "todo"}
+CSV_TAG_ALIASES = {"tags", "tag", "labels", "categories"}
+CSV_PARENT_ALIASES = {"parent", "parenttask", "parenttitle", "parentname"}
+
+
+@tasks_router.get("/import-csv/schema")
+async def import_csv_schema():
+    """Return accepted CSV columns and examples for client-side help UI."""
+    return {
+        "required_any_of": {
+            "title": sorted(CSV_TITLE_ALIASES),
+        },
+        "optional": {
+            "description": sorted(CSV_DESC_ALIASES),
+            "due_date": sorted(CSV_DUE_ALIASES),
+            "duration": sorted(CSV_DURATION_ALIASES),
+            "status": sorted(CSV_STATUS_ALIASES),
+            "tags": sorted(CSV_TAG_ALIASES),
+            "parent": sorted(CSV_PARENT_ALIASES),
+        },
+        "examples": {
+            "due_date": ["2026-06-20", "2026-06-20T14:30:00", "06/20/2026"],
+            "duration": ["90", "1:30", "1h 30m", "45m"],
+            "status": ["todo", "done", "completed"],
+            "tags": [":work:deep:", "work,deep", "work;deep"],
+        },
+    }
+
+
+# ── Pydantic schemas ───────────────────────────────────────────────────────────
+
+class TaskCreate(BaseModel):
+    project_id: int
+    title: str
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    parent_task_id: Optional[int] = None
+    is_recurring: bool = False
+    recurrence_rule: Optional[str] = None
+    tag_ids: List[int] = []
+
+
+class TaskUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    parent_task_id: Optional[int] = None
+    is_recurring: Optional[bool] = None
+    recurrence_rule: Optional[str] = None
+    tag_ids: Optional[List[int]] = None
+
+
+class TagCreate(BaseModel):
+    name: str
+    color: str = "#6366f1"
+
+
+class TagUpdate(BaseModel):
+    name: Optional[str] = None
+    color: Optional[str] = None
+
+
+class SessionStop(BaseModel):
+    notes: Optional[str] = None
+
+
+# ── Task endpoints ─────────────────────────────────────────────────────────────
+
+@tasks_router.get("")
+async def list_tasks(
+    project_id: int,
+    include_completed: bool = False,
+    tag_id: Optional[int] = None,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Return top-level tasks (no parent) sorted by tree urgency descending."""
+    _assert_project_member(project_id, user_id, session)
+    query = (
+        session.query(Task)
+        .filter(Task.project_id == project_id, Task.parent_task_id.is_(None))
+        .options(selectinload(Task.tags), selectinload(Task.work_sessions))
+    )
+    if not include_completed:
+        query = query.filter(Task.is_completed.is_(False))
+    tasks = query.all()
+
+    if tag_id is not None:
+        tasks = [t for t in tasks if any(tg.id == tag_id for tg in t.tags)]
+
+    now = datetime.datetime.utcnow()
+    serialized = [_serialize_task(t, now) for t in tasks]
+    serialized.sort(key=lambda t: t["urgency_score"], reverse=True)
+    return serialized
+
+
+@tasks_router.get("/calendar")
+async def tasks_for_calendar(
+    project_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """All incomplete tasks that have a due_date, for calendar rendering."""
+    _assert_project_member(project_id, user_id, session)
+    tasks = (
+        session.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.due_date.isnot(None),
+            Task.is_completed.is_(False),
+        )
+        .options(selectinload(Task.tags))
+        .all()
+    )
+    now = datetime.datetime.utcnow()
+    return [
+        {
+            "id": t.id,
+            "title": t.title,
+            "due_date": t.due_date.isoformat(),
+            "urgency_score": _own_urgency(t, now),
+            "tags": [{"id": tg.id, "name": tg.name, "color": tg.color} for tg in t.tags],
+            "is_completed": t.is_completed,
+        }
+        for t in tasks
+    ]
+
+
+@tasks_router.get("/gantt")
+async def tasks_for_gantt(
+    project_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Tasks with both start_by and due_date for Gantt chart rendering."""
+    _assert_project_member(project_id, user_id, session)
+    tasks = (
+        session.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.due_date.isnot(None),
+            Task.is_completed.is_(False),
+        )
+        .options(selectinload(Task.tags))
+        .all()
+    )
+    now = datetime.datetime.utcnow()
+    result = []
+    for t in tasks:
+        sb = _start_by(t)
+        result.append({
+            "id": t.id,
+            "title": t.title,
+            "parent_task_id": t.parent_task_id,
+            "due_date": t.due_date.isoformat(),
+            "start_by": sb.isoformat() if sb else None,
+            "duration_minutes": t.duration_minutes,
+            "urgency_score": _own_urgency(t, now),
+            "tags": [{"id": tg.id, "name": tg.name, "color": tg.color} for tg in t.tags],
+        })
+    return result
+
+
+# ── Analytics (MUST be before /{id} to avoid route shadowing) ─────────────────
+
+@tasks_router.get("/analytics/estimation")
+async def estimation_analytics(
+    project_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Per-tag estimation accuracy: avg(actual / estimated) for completed tasks."""
+    _assert_project_member(project_id, user_id, session)
+    tasks = (
+        session.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.is_completed.is_(True),
+            Task.duration_minutes.isnot(None),
+        )
+        .options(selectinload(Task.tags), selectinload(Task.work_sessions))
+        .all()
+    )
+
+    data = []
+    for t in tasks:
+        actual = _actual_duration_minutes(t)
+        if actual is None or t.duration_minutes <= 0:
+            continue
+        data.append({"ratio": actual / t.duration_minutes, "tags": [tg.name for tg in t.tags]})
+
+    if not data:
+        return {"global": None, "by_tag": {}}
+
+    global_ratio = sum(d["ratio"] for d in data) / len(data)
+    by_tag: Dict[str, list] = {}
+    for d in data:
+        for tag in d["tags"]:
+            by_tag.setdefault(tag, []).append(d["ratio"])
+
+    return {
+        "global": {
+            "avg_ratio": global_ratio,
+            "sample_count": len(data),
+            "note": "avg(actual/estimated): 1.0=perfect, >1=underestimate, <1=overestimate",
+        },
+        "by_tag": {
+            tag: {"avg_ratio": sum(r) / len(r), "sample_count": len(r)}
+            for tag, r in by_tag.items()
+        },
+    }
+
+
+@tasks_router.get("/analytics/punctuality")
+async def punctuality_analytics(
+    project_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Per-tag on-time rate: tasks completed before their due_date."""
+    _assert_project_member(project_id, user_id, session)
+    tasks = (
+        session.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.is_completed.is_(True),
+            Task.due_date.isnot(None),
+            Task.completed_at.isnot(None),
+        )
+        .options(selectinload(Task.tags))
+        .all()
+    )
+
+    if not tasks:
+        return {"global": None, "by_tag": {}}
+
+    rows = [
+        {
+            "lateness_min": (t.completed_at - t.due_date).total_seconds() / 60.0,
+            "on_time": t.completed_at <= t.due_date,
+            "tags": [tg.name for tg in t.tags],
+        }
+        for t in tasks
+    ]
+
+    global_on_time = sum(1 for r in rows if r["on_time"]) / len(rows)
+    global_lateness = sum(r["lateness_min"] for r in rows) / len(rows)
+
+    by_tag: Dict[str, list] = {}
+    for r in rows:
+        for tag in r["tags"]:
+            by_tag.setdefault(tag, []).append(r)
+
+    return {
+        "global": {
+            "on_time_rate": global_on_time,
+            "avg_lateness_minutes": global_lateness,
+            "sample_count": len(tasks),
+        },
+        "by_tag": {
+            tag: {
+                "on_time_rate": sum(1 for r in rs if r["on_time"]) / len(rs),
+                "avg_lateness_minutes": sum(r["lateness_min"] for r in rs) / len(rs),
+                "sample_count": len(rs),
+            }
+            for tag, rs in by_tag.items()
+        },
+    }
+
+
+@tasks_router.get("/analytics/history")
+async def analytics_history(
+    project_id: int,
+    limit: int = 200,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Raw completed task data for charting — estimation + punctuality combined."""
+    _assert_project_member(project_id, user_id, session)
+    tasks = (
+        session.query(Task)
+        .filter(Task.project_id == project_id, Task.is_completed.is_(True))
+        .options(selectinload(Task.tags), selectinload(Task.work_sessions))
+        .order_by(Task.completed_at.desc())
+        .limit(limit)
+        .all()
+    )
+    rows = []
+    for t in tasks:
+        actual = _actual_duration_minutes(t)
+        lateness = (
+            (t.completed_at - t.due_date).total_seconds() / 60.0
+            if t.due_date and t.completed_at
+            else None
+        )
+        rows.append({
+            "id": t.id,
+            "title": t.title,
+            "tags": [tg.name for tg in t.tags],
+            "estimated_minutes": t.duration_minutes,
+            "actual_minutes": actual,
+            "due_date": t.due_date.isoformat() if t.due_date else None,
+            "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+            "lateness_minutes": lateness,
+            "on_time": (lateness is not None and lateness <= 0),
+        })
+    return rows
+
+
+# ── Tag endpoints (MUST be before /{id}) ──────────────────────────────────────
+
+@tasks_router.get("/tags")
+async def list_tags(
+    project_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    _assert_project_member(project_id, user_id, session)
+    tags = session.query(Tag).filter(Tag.user_id == user_id).all()
+    return [{"id": t.id, "name": t.name, "color": t.color} for t in tags]
+
+
+@tasks_router.post("/tags")
+async def create_tag(
+    body: TagCreate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    existing = session.query(Tag).filter(Tag.user_id == user_id, Tag.name == body.name).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Tag with this name already exists")
+    tag = Tag(user_id=user_id, name=body.name, color=body.color)
+    session.add(tag)
+    session.commit()
+    session.refresh(tag)
+    return {"id": tag.id, "name": tag.name, "color": tag.color}
+
+
+@tasks_router.put("/tags/{tag_id}")
+async def update_tag(
+    tag_id: int,
+    body: TagUpdate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    tag = session.query(Tag).filter(Tag.id == tag_id, Tag.user_id == user_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    if body.name is not None:
+        tag.name = body.name
+    if body.color is not None:
+        tag.color = body.color
+    session.commit()
+    return {"id": tag.id, "name": tag.name, "color": tag.color}
+
+
+@tasks_router.delete("/tags/{tag_id}")
+async def delete_tag(
+    tag_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    tag = session.query(Tag).filter(Tag.id == tag_id, Tag.user_id == user_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    session.delete(tag)
+    session.commit()
+    return {"message": "Tag deleted"}
+
+
+@tasks_router.post("/import-csv")
+async def import_tasks_csv(
+    project_id: int,
+    file: UploadFile = File(...),
+    dry_run: bool = False,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Import tasks from a CSV file (supports Org export-style columns)."""
+    _assert_can_write(project_id, user_id, session)
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV has no header row")
+
+    tag_cache = {
+        t.name.strip().lower(): t for t in session.query(Tag).filter(Tag.user_id == user_id).all()
+    }
+    title_to_task_id: Dict[str, int] = {
+        t.title.strip().lower(): t.id
+        for t in session.query(Task).filter(Task.project_id == project_id).all()
+        if t.title and t.title.strip()
+    }
+
+    created = 0
+    created_tags = 0
+    skipped = 0
+    errors: List[Dict[str, Any]] = []
+    now = datetime.datetime.utcnow()
+    done_tokens = {"done", "completed", "complete", "closed", "x", "yes", "true"}
+
+    # In dry-run mode we never write to the database and emulate new rows locally.
+    virtual_tag_names = set(tag_cache.keys())
+    virtual_title_to_task_id = dict(title_to_task_id)
+    virtual_next_id = -1
+
+    for row_num, row in enumerate(reader, start=2):
+        if not row or all(v is None or str(v).strip() == "" for v in row.values()):
+            continue
+
+        title = _csv_get(row, CSV_TITLE_ALIASES)
+        if not title:
+            skipped += 1
+            errors.append({"row": row_num, "error": "Missing title/task column"})
+            continue
+
+        row_new_tags: List[tuple[str, Tag]] = []
+        row_new_tag_count = 0
+        try:
+            due_raw = _csv_get(row, CSV_DUE_ALIASES)
+            due_date = _parse_due_date(due_raw) if due_raw else None
+            duration_minutes = _parse_duration_minutes(_csv_get(row, CSV_DURATION_ALIASES))
+            description = _csv_get(row, CSV_DESC_ALIASES)
+            parent_ref = _csv_get(row, CSV_PARENT_ALIASES)
+            status_raw = (_csv_get(row, CSV_STATUS_ALIASES) or "").strip().lower()
+            is_completed = status_raw in done_tokens or status_raw.startswith("done")
+
+            if dry_run:
+                for tag_name in _parse_tags(_csv_get(row, CSV_TAG_ALIASES)):
+                    key = tag_name.lower()
+                    if key not in virtual_tag_names:
+                        virtual_tag_names.add(key)
+                        row_new_tag_count += 1
+
+                if parent_ref:
+                    _ = virtual_title_to_task_id.get(parent_ref.strip().lower())
+
+                created_tags += row_new_tag_count
+                created += 1
+                virtual_title_to_task_id.setdefault(title.strip().lower(), virtual_next_id)
+                virtual_next_id -= 1
+                continue
+
+            tags = []
+            for tag_name in _parse_tags(_csv_get(row, CSV_TAG_ALIASES)):
+                key = tag_name.lower()
+                tag = tag_cache.get(key)
+                if tag is None:
+                    tag = Tag(user_id=user_id, name=tag_name, color="#6366f1")
+                    session.add(tag)
+                    session.flush()
+                    row_new_tags.append((key, tag))
+                    row_new_tag_count += 1
+                tags.append(tag)
+
+            parent_task_id = None
+            if parent_ref:
+                parent_task_id = title_to_task_id.get(parent_ref.strip().lower())
+
+            task = Task(
+                user_id=user_id,
+                project_id=project_id,
+                title=title,
+                description=description,
+                due_date=due_date,
+                duration_minutes=duration_minutes,
+                parent_task_id=parent_task_id,
+                is_completed=is_completed,
+                completed_at=now if is_completed else None,
+            )
+            task.tags = tags
+            session.add(task)
+            session.flush()
+            session.commit()
+
+            for key, tag in row_new_tags:
+                tag_cache[key] = tag
+            created_tags += row_new_tag_count
+            title_to_task_id.setdefault(title.strip().lower(), task.id)
+            created += 1
+        except Exception as exc:
+            session.rollback()
+            skipped += 1
+            errors.append({"row": row_num, "title": title, "error": str(exc)})
+
+    return {
+        "filename": file.filename,
+        "dry_run": dry_run,
+        "created": created,
+        "created_tags": created_tags,
+        "skipped": skipped,
+        "errors": errors[:50],
+        "total_errors": len(errors),
+    }
+
+
+# ── Individual task endpoints ──────────────────────────────────────────────────
+
+@tasks_router.get("/{task_id}")
+async def get_task(
+    task_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    task = _load_task(task_id, user_id, session)
+    return _serialize_task(task, datetime.datetime.utcnow())
+
+
+@tasks_router.post("")
+async def create_task(
+    body: TaskCreate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    _assert_can_write(body.project_id, user_id, session)
+    due_date = None
+    if body.due_date:
+        try:
+            due_date = datetime.datetime.fromisoformat(body.due_date)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="due_date must be ISO datetime")
+
+    if body.parent_task_id:
+        parent = session.query(Task).filter(
+            Task.id == body.parent_task_id, Task.project_id == body.project_id
+        ).first()
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent task not found")
+
+    task = Task(
+        user_id=user_id,
+        project_id=body.project_id,
+        title=body.title,
+        description=body.description,
+        due_date=due_date,
+        duration_minutes=body.duration_minutes,
+        parent_task_id=body.parent_task_id,
+        is_recurring=body.is_recurring,
+        recurrence_rule=body.recurrence_rule,
+    )
+    if body.tag_ids:
+        tags = session.query(Tag).filter(Tag.id.in_(body.tag_ids), Tag.user_id == user_id).all()
+        task.tags = tags
+
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return _serialize_task(task, datetime.datetime.utcnow())
+
+
+@tasks_router.put("/{task_id}")
+async def update_task(
+    task_id: int,
+    body: TaskUpdate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    task = _load_task(task_id, user_id, session)
+
+    if body.title is not None:
+        task.title = body.title
+    if body.description is not None:
+        task.description = body.description
+    if body.due_date is not None:
+        try:
+            task.due_date = datetime.datetime.fromisoformat(body.due_date) if body.due_date else None
+        except ValueError:
+            raise HTTPException(status_code=422, detail="due_date must be ISO datetime")
+    if body.duration_minutes is not None:
+        task.duration_minutes = body.duration_minutes
+    if body.parent_task_id is not None:
+        task.parent_task_id = body.parent_task_id
+    if body.is_recurring is not None:
+        task.is_recurring = body.is_recurring
+    if body.recurrence_rule is not None:
+        task.recurrence_rule = body.recurrence_rule
+    if body.tag_ids is not None:
+        tags = session.query(Tag).filter(Tag.id.in_(body.tag_ids), Tag.user_id == user_id).all()
+        task.tags = tags
+
+    task.updated_at = datetime.datetime.utcnow()
+    session.commit()
+    return _serialize_task(task, datetime.datetime.utcnow())
+
+
+@tasks_router.delete("/{task_id}")
+async def delete_task(
+    task_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    task = session.query(Task).filter(Task.id == task_id, Task.user_id == user_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    session.delete(task)
+    session.commit()
+    return {"message": "Task deleted"}
+
+
+@tasks_router.post("/{task_id}/complete")
+async def toggle_complete(
+    task_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    task = _load_task(task_id, user_id, session)
+    now = datetime.datetime.utcnow()
+
+    if task.is_completed:
+        # Un-complete
+        task.is_completed = False
+        task.completed_at = None
+    else:
+        # Complete — close any active work session first
+        active = next((s for s in task.work_sessions if s.ended_at is None), None)
+        if active:
+            active.ended_at = now
+
+        task.is_completed = True
+        task.completed_at = now
+
+        # If recurring, create next occurrence
+        if task.is_recurring and task.recurrence_rule and task.due_date:
+            next_due = _next_due_date(task.due_date, task.recurrence_rule)
+            next_task = Task(
+                user_id=user_id,
+                project_id=task.project_id,
+                title=task.title,
+                description=task.description,
+                due_date=next_due,
+                duration_minutes=task.duration_minutes,
+                parent_task_id=task.parent_task_id,
+                is_recurring=True,
+                recurrence_rule=task.recurrence_rule,
+            )
+            next_task.tags = list(task.tags)
+            session.add(next_task)
+
+    task.updated_at = now
+    session.commit()
+    return _serialize_task(task, now)
+
+
+@tasks_router.post("/{task_id}/start")
+async def start_session(
+    task_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    task = _load_task(task_id, user_id, session)
+    active = next((s for s in task.work_sessions if s.ended_at is None), None)
+    if active:
+        raise HTTPException(status_code=409, detail="A work session is already active for this task")
+
+    ws = WorkSession(task_id=task.id, user_id=user_id, started_at=datetime.datetime.utcnow())
+    session.add(ws)
+    session.commit()
+    return {"message": "Work session started", "session_id": ws.id, "started_at": ws.started_at.isoformat()}
+
+
+@tasks_router.post("/{task_id}/stop")
+async def stop_session(
+    task_id: int,
+    body: SessionStop = SessionStop(),
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    task = _load_task(task_id, user_id, session)
+    active = next((s for s in task.work_sessions if s.ended_at is None), None)
+    if not active:
+        raise HTTPException(status_code=404, detail="No active work session for this task")
+
+    now = datetime.datetime.utcnow()
+    active.ended_at = now
+    active.notes = body.notes
+    duration = (now - active.started_at).total_seconds() / 60.0
+    session.commit()
+    return {
+        "message": "Work session stopped",
+        "duration_minutes": round(duration, 2),
+        "ended_at": now.isoformat(),
+    }
+
+
+# ── Plan endpoints ─────────────────────────────────────────────────────────────
+
+class PlanCreate(BaseModel):
+    project_id: int
+    title: str
+    content: str = ""
+
+
+class PlanUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+
+
+@plans_router.get("")
+async def list_plans(
+    project_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    _assert_project_member(project_id, user_id, session)
+    plans = session.query(Plan).filter(Plan.project_id == project_id).order_by(Plan.updated_at.desc()).all()
+    return [
+        {
+            "id": p.id,
+            "project_id": p.project_id,
+            "title": p.title,
+            "created_at": p.created_at.isoformat(),
+            "updated_at": p.updated_at.isoformat() if p.updated_at else p.created_at.isoformat(),
+        }
+        for p in plans
+    ]
+
+
+@plans_router.post("")
+async def create_plan(
+    body: PlanCreate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    _assert_can_write(body.project_id, user_id, session)
+    plan = Plan(user_id=user_id, project_id=body.project_id, title=body.title, content=body.content)
+    session.add(plan)
+    session.commit()
+    session.refresh(plan)
+    return {"id": plan.id, "project_id": plan.project_id, "title": plan.title, "content": plan.content,
+            "created_at": plan.created_at.isoformat(), "updated_at": plan.created_at.isoformat()}
+
+
+@plans_router.get("/{plan_id}")
+async def get_plan(
+    plan_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    plan = session.query(Plan).filter(Plan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    _assert_project_member(plan.project_id, user_id, session)
+
+    # Expand {{task:ID}} tokens → include task objects keyed by ID
+    token_ids = [int(m.group(1)) for m in re.finditer(r"\{\{task:(\d+)\}\}", plan.content)]
+    now = datetime.datetime.utcnow()
+    task_map: Dict[str, Any] = {}
+    for tid in set(token_ids):
+        t = (
+            session.query(Task)
+            .filter(Task.id == tid, Task.user_id == user_id)
+            .options(selectinload(Task.tags), selectinload(Task.work_sessions))
+            .first()
+        )
+        if t:
+            task_map[str(tid)] = _serialize_task(t, now)
+
+    return {
+        "id": plan.id,
+        "project_id": plan.project_id,
+        "title": plan.title,
+        "content": plan.content,
+        "tasks": task_map,
+        "created_at": plan.created_at.isoformat(),
+        "updated_at": plan.updated_at.isoformat() if plan.updated_at else plan.created_at.isoformat(),
+    }
+
+
+@plans_router.put("/{plan_id}")
+async def update_plan(
+    plan_id: int,
+    body: PlanUpdate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    plan = session.query(Plan).filter(Plan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    _assert_can_write(plan.project_id, user_id, session)
+    if body.title is not None:
+        plan.title = body.title
+    if body.content is not None:
+        plan.content = body.content
+    plan.updated_at = datetime.datetime.utcnow()
+    session.commit()
+    return {
+        "id": plan.id,
+        "project_id": plan.project_id,
+        "title": plan.title,
+        "updated_at": plan.updated_at.isoformat(),
+    }
+
+
+@plans_router.delete("/{plan_id}")
+async def delete_plan(
+    plan_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    plan = session.query(Plan).filter(Plan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    _assert_can_write(plan.project_id, user_id, session)
+    session.delete(plan)
+    session.commit()
+    return {"message": "Plan deleted"}

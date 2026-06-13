@@ -2,10 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../models/workout.dart';
-import '../services/api_service.dart';
-import '../services/auth_service.dart';
-import '../widgets/workout_history_panel.dart';
-import 'login_screen.dart';
+import '../../../shared/services/api_service.dart';
+import '../../../shared/services/auth_service.dart';
+import '../../../shared/widgets/workout_history_panel.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -107,9 +106,8 @@ class _HomeScreenState extends State<HomeScreen> {
               case 'logout':
                 await AuthService.logout();
                 if (context.mounted) {
-                  Navigator.of(context).pushAndRemoveUntil(
-                    MaterialPageRoute(builder: (_) => const LoginScreen()),
-                    (route) => false,
+                  Navigator.of(context).pushNamedAndRemoveUntil(
+                    '/login', (route) => false,
                   );
                 }
                 break;

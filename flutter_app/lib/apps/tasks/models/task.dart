@@ -1,0 +1,198 @@
+import 'package:flutter/material.dart';
+
+class Tag {
+  final int id;
+  final String name;
+  final String color; // hex, e.g. "#6366f1"
+
+  const Tag({required this.id, required this.name, required this.color});
+
+  factory Tag.fromJson(Map<String, dynamic> json) => Tag(
+        id: json['id'],
+        name: json['name'],
+        color: json['color'] ?? '#6366f1',
+      );
+
+  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'color': color};
+
+  Color get flutterColor {
+    final hex = color.replaceFirst('#', '');
+    return Color(int.parse('FF$hex', radix: 16));
+  }
+}
+
+class Task {
+  final int id;
+  final int? projectId;
+  final String title;
+  final String? description;
+  final DateTime? dueDate;
+  final int? durationMinutes;
+  final DateTime? startBy;        // computed by backend
+  final bool isCompleted;
+  final DateTime? completedAt;
+  final bool isRecurring;
+  final String? recurrenceRule;
+  final List<Tag> tags;
+  final List<Task> subtasks;
+  final double urgencyScore;      // 0=neutral, 1=overdue/max-urgency
+  final double? actualDurationMinutes;
+  final int? parentTaskId;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  const Task({
+    required this.id,
+    this.projectId,
+    required this.title,
+    this.description,
+    this.dueDate,
+    this.durationMinutes,
+    this.startBy,
+    required this.isCompleted,
+    this.completedAt,
+    required this.isRecurring,
+    this.recurrenceRule,
+    required this.tags,
+    required this.subtasks,
+    required this.urgencyScore,
+    this.actualDurationMinutes,
+    this.parentTaskId,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  factory Task.fromJson(Map<String, dynamic> json) => Task(
+        id: json['id'],
+      projectId: json['project_id'],
+        title: json['title'],
+        description: json['description'],
+        dueDate: json['due_date'] != null ? DateTime.parse(json['due_date']) : null,
+        durationMinutes: json['duration_minutes'],
+        startBy: json['start_by'] != null ? DateTime.parse(json['start_by']) : null,
+        isCompleted: json['is_completed'] ?? false,
+        completedAt: json['completed_at'] != null ? DateTime.parse(json['completed_at']) : null,
+        isRecurring: json['is_recurring'] ?? false,
+        recurrenceRule: json['recurrence_rule'],
+        tags: (json['tags'] as List? ?? []).map((t) => Tag.fromJson(t)).toList(),
+        subtasks: (json['subtasks'] as List? ?? []).map((t) => Task.fromJson(t)).toList(),
+        urgencyScore: (json['urgency_score'] as num?)?.toDouble() ?? 0.0,
+        actualDurationMinutes: (json['actual_duration_minutes'] as num?)?.toDouble(),
+        parentTaskId: json['parent_task_id'],
+        createdAt: DateTime.parse(json['created_at']),
+        updatedAt: DateTime.parse(json['updated_at']),
+      );
+
+  /// Progress fraction for the progress bar [0, 1] using actual vs estimated duration.
+  double get progressFraction {
+    if (durationMinutes == null || durationMinutes! <= 0) return 0.0;
+    if (actualDurationMinutes == null) return 0.0;
+    return (actualDurationMinutes! / durationMinutes!).clamp(0.0, 1.0);
+  }
+
+  String get dueDateLabel {
+    if (dueDate == null) return '';
+    final now = DateTime.now();
+    final diff = dueDate!.difference(now);
+    if (diff.isNegative) {
+      final days = (-diff.inDays);
+      return days > 0 ? '${days}d overdue' : 'Overdue today';
+    }
+    if (diff.inDays == 0) return 'Due today';
+    if (diff.inDays == 1) return 'Due tomorrow';
+    return 'Due in ${diff.inDays}d';
+  }
+
+  /// Punctuality badge text for completed tasks.
+  String? get punctualityLabel {
+    if (!isCompleted || completedAt == null || dueDate == null) return null;
+    final diff = completedAt!.difference(dueDate!);
+    if (diff.isNegative || diff.inMinutes == 0) {
+      final hrs = (-diff.inMinutes) ~/ 60;
+      return hrs > 0 ? '✓ ${hrs}h early' : '✓ On time';
+    }
+    final hrs = diff.inMinutes ~/ 60;
+    return hrs > 0 ? '${hrs}h late' : '${diff.inMinutes}m late';
+  }
+
+  bool get punctuallyCompleted =>
+      isCompleted && completedAt != null && dueDate != null && !completedAt!.isAfter(dueDate!);
+}
+
+class GanttTask {
+  final int id;
+  final String title;
+  final int? parentTaskId;
+  final DateTime? dueDate;
+  final DateTime? startBy;
+  final int? durationMinutes;
+  final double urgencyScore;
+  final List<Tag> tags;
+
+  const GanttTask({
+    required this.id,
+    required this.title,
+    this.parentTaskId,
+    this.dueDate,
+    this.startBy,
+    this.durationMinutes,
+    required this.urgencyScore,
+    required this.tags,
+  });
+
+  factory GanttTask.fromJson(Map<String, dynamic> json) => GanttTask(
+        id: json['id'],
+        title: json['title'],
+        parentTaskId: json['parent_task_id'],
+        dueDate: json['due_date'] != null ? DateTime.parse(json['due_date']) : null,
+        startBy: json['start_by'] != null ? DateTime.parse(json['start_by']) : null,
+        durationMinutes: json['duration_minutes'],
+        urgencyScore: (json['urgency_score'] as num?)?.toDouble() ?? 0.0,
+        tags: (json['tags'] as List? ?? []).map((t) => Tag.fromJson(t)).toList(),
+      );
+}
+
+class Plan {
+  final int id;
+  final int projectId;
+  final String title;
+  final String content;
+  final Map<String, Task> tasks;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  const Plan({
+    required this.id,
+    required this.projectId,
+    required this.title,
+    required this.content,
+    required this.tasks,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  factory Plan.fromJson(Map<String, dynamic> json) => Plan(
+        id: json['id'],
+        projectId: json['project_id'] ?? 0,
+        title: json['title'],
+        content: json['content'] ?? '',
+        tasks: (json['tasks'] as Map<String, dynamic>? ?? {})
+            .map((k, v) => MapEntry(k, Task.fromJson(v))),
+        createdAt: DateTime.parse(json['created_at']),
+        updatedAt: DateTime.parse(json['updated_at']),
+      );
+}
+
+class PlanSummary {
+  final int id;
+  final String title;
+  final DateTime updatedAt;
+
+  const PlanSummary({required this.id, required this.title, required this.updatedAt});
+
+  factory PlanSummary.fromJson(Map<String, dynamic> json) => PlanSummary(
+        id: json['id'],
+        title: json['title'],
+        updatedAt: DateTime.parse(json['updated_at']),
+      );
+}

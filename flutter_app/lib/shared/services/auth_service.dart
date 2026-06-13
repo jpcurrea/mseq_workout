@@ -8,9 +8,12 @@ class AuthService {
   static const String _rememberMeKey = 'remember_me';
   static const _storage = FlutterSecureStorage();
 
-  // Must match FRONTEND_URL in backend .env
-  static const String backendUrl = 'https://workout-backend-h6pd.onrender.com'; // production
-  // static const String backendUrl = 'https://workout-backend-h6pd.onrender.com'; // local dev
+  // URL injected at build time via --dart-define=BACKEND_URL=...
+  // Defaults to production when not specified.
+  static const String backendUrl = String.fromEnvironment(
+    'BACKEND_URL',
+    defaultValue: 'https://workout-backend-h6pd.onrender.com',
+  );
 
   static Future<String?> getToken() async {
     return _storage.read(key: _tokenKey);

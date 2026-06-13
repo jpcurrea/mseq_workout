@@ -61,6 +61,29 @@ GOOGLE_CLIENT_SECRET=<from Google Cloud Console>
 FRONTEND_URL=http://localhost:8080
 ```
 
+### Local Planning Agent Model (No Cloud API Key Required)
+
+You can run a local OpenAI-compatible model endpoint (for example Ollama) and use the planning chat without an API key.
+
+1. Run Ollama locally and pull a model:
+
+```cmd
+ollama pull qwen2.5:7b
+```
+
+2. Set these in `backend/.env`:
+
+```env
+LLM_API_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=qwen2.5:7b
+LLM_API_KEY=
+OPENAI_API_KEY=
+```
+
+3. Restart the backend process.
+
+The backend agent now treats local endpoints (`localhost` / `127.0.0.1`) as key-optional while keeping API key requirements for non-local endpoints.
+
 ### Flutter Frontend
 
 ```cmd

@@ -3,8 +3,8 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../models/workout.dart';
-import '../services/api_service.dart';
-import '../widgets/workout_history_panel.dart';
+import '../../../shared/services/api_service.dart';
+import '../../../shared/widgets/workout_history_panel.dart';
 
 class WorkoutManagementScreen extends StatefulWidget {
   const WorkoutManagementScreen({super.key});

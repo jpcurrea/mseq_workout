@@ -14,9 +14,11 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     UniqueConstraint,
+    Table,
+    Text,
     text,
 )
-from sqlalchemy.orm import declarative_base, Session, sessionmaker, relationship
+from sqlalchemy.orm import declarative_base, Session, sessionmaker, relationship, backref
 from sqlalchemy.pool import StaticPool
 import datetime
 import os
@@ -42,10 +44,20 @@ class User(Base):
     
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     last_login = Column(DateTime, nullable=True)
+    # Last project the user had open in the task app (restored on next login)
+    active_project_id = Column(Integer, nullable=True)  # FK added after Project is defined
     
     # Relationships
     workouts = relationship("Workout", back_populates="user", cascade="all, delete-orphan")
     schedule_entries = relationship("ScheduleEntry", back_populates="user", cascade="all, delete-orphan")
+    tasks = relationship("Task", back_populates="user", cascade="all, delete-orphan")
+    tags = relationship("Tag", back_populates="user", cascade="all, delete-orphan")
+    work_sessions = relationship("WorkSession", back_populates="user", cascade="all, delete-orphan")
+    plans = relationship("Plan", back_populates="user", cascade="all, delete-orphan")
+    llm_conversations = relationship("LLMConversation", back_populates="user", cascade="all, delete-orphan")
+    accounts = relationship("Account", back_populates="user", cascade="all, delete-orphan")
+    budget_goals = relationship("BudgetGoal", back_populates="user", cascade="all, delete-orphan")
+    project_memberships = relationship("ProjectMembership", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
@@ -93,6 +105,234 @@ class ScheduleEntry(Base):
         return f"<ScheduleEntry(id={self.id}, user_id={self.user_id}, workout_id={self.workout_id}, date={self.date})>"
 
 
+# ── Project models ─────────────────────────────────────────────────────────────
+
+class Project(Base):
+    """A named container for tasks and plans, sharable with other users."""
+    __tablename__ = "projects"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    memberships = relationship("ProjectMembership", back_populates="project", cascade="all, delete-orphan")
+    invites = relationship("ProjectInvite", back_populates="project", cascade="all, delete-orphan")
+    tasks = relationship("Task", back_populates="project")
+    plans = relationship("Plan", back_populates="project")
+
+    def __repr__(self):
+        return f"<Project(id={self.id}, name='{self.name}')>"
+
+
+class ProjectMembership(Base):
+    """Maps a user to a project with a role."""
+    __tablename__ = "project_memberships"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    role = Column(String, nullable=False, default="editor")  # "owner" | "editor" | "viewer"
+    joined_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uix_project_user"),)
+
+    project = relationship("Project", back_populates="memberships")
+    user = relationship("User", back_populates="project_memberships")
+
+    def __repr__(self):
+        return f"<ProjectMembership(project={self.project_id}, user={self.user_id}, role='{self.role}')>"
+
+
+class ProjectInvite(Base):
+    """A redeemable token that grants membership to a project."""
+    __tablename__ = "project_invites"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    token = Column(String, unique=True, nullable=False, index=True)  # random UUID
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    role_to_grant = Column(String, nullable=False, default="editor")  # "editor" | "viewer"
+    max_uses = Column(Integer, nullable=True)  # None = unlimited
+    use_count = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime, nullable=True)  # None = never expires
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    project = relationship("Project", back_populates="invites")
+
+    def __repr__(self):
+        return f"<ProjectInvite(id={self.id}, project={self.project_id})>"
+
+# M2M association table between Task and Tag (no extra columns)
+task_tag_link = Table(
+    "task_tag_links",
+    Base.metadata,
+    Column("task_id", Integer, ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", Integer, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class Tag(Base):
+    """User-defined label for tasks (name + hex color)."""
+    __tablename__ = "tags"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    color = Column(String, nullable=False, default="#6366f1")  # hex color
+
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uix_user_tag_name"),)
+
+    user = relationship("User", back_populates="tags")
+    tasks = relationship("Task", secondary=task_tag_link, back_populates="tags")
+
+    def __repr__(self):
+        return f"<Tag(id={self.id}, name='{self.name}')>"
+
+
+class Task(Base):
+    """A task or sub-task. Self-referential for hierarchical subtasks."""
+    __tablename__ = "tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    due_date = Column(DateTime, nullable=True)
+    duration_minutes = Column(Integer, nullable=True)  # estimated
+    parent_task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    is_completed = Column(Boolean, nullable=False, default=False)
+    completed_at = Column(DateTime, nullable=True)
+    is_recurring = Column(Boolean, nullable=False, default=False)
+    recurrence_rule = Column(String, nullable=True)  # "DAILY" | "WEEKLY" | "MONTHLY"
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow,
+    )
+
+    user = relationship("User", back_populates="tasks")
+    project = relationship("Project", back_populates="tasks")
+    # Self-referential adjacency list: subtasks / parent
+    subtasks = relationship(
+        "Task",
+        foreign_keys=[parent_task_id],
+        backref=backref("parent_task", remote_side=[id]),
+        cascade="all",
+        lazy="select",
+    )
+    tags = relationship("Tag", secondary=task_tag_link, back_populates="tasks")
+    work_sessions = relationship("WorkSession", back_populates="task", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<Task(id={self.id}, title='{self.title}', completed={self.is_completed})>"
+
+
+class WorkSession(Base):
+    """Tracks actual time spent on a task. ended_at=None means currently active."""
+    __tablename__ = "work_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    started_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)   # null = session still active
+    notes = Column(Text, nullable=True)
+
+    task = relationship("Task", back_populates="work_sessions")
+    user = relationship("User", back_populates="work_sessions")
+
+    def __repr__(self):
+        return f"<WorkSession(id={self.id}, task_id={self.task_id}, active={self.ended_at is None})>"
+
+
+class Plan(Base):
+    """A rich markdown document that can embed task widgets via {{task:ID}} tokens."""
+    __tablename__ = "plans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow,
+    )
+
+    user = relationship("User", back_populates="plans")
+    project = relationship("Project", back_populates="plans")
+    llm_conversations = relationship("LLMConversation", back_populates="plan")
+
+    def __repr__(self):
+        return f"<Plan(id={self.id}, title='{self.title}')>"
+
+
+class LLMConversation(Base):
+    """Stored LLM agent conversation history (planning or analytics mode)."""
+    __tablename__ = "llm_conversations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    mode = Column(String, nullable=False)           # "planning" | "analytics"
+    messages = Column(Text, nullable=False, default="[]")  # JSON array string
+    related_plan_id = Column(Integer, ForeignKey("plans.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow,
+    )
+
+    user = relationship("User", back_populates="llm_conversations")
+    plan = relationship("Plan", back_populates="llm_conversations")
+
+
+# ── Budget models ──────────────────────────────────────────────────────────────
+
+class Account(Base):
+    """A bank/savings account whose balance contributes to 'spendable now'."""
+    __tablename__ = "accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    balance = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow,
+    )
+
+    user = relationship("User", back_populates="accounts")
+
+    def __repr__(self):
+        return f"<Account(id={self.id}, name='{self.name}', balance={self.balance})>"
+
+
+class BudgetGoal(Base):
+    """A savings goal that reserves money from the 'spendable now' balance."""
+    __tablename__ = "budget_goals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    target_amount = Column(Float, nullable=False)
+    target_date = Column(Date, nullable=True)
+    current_saved = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    user = relationship("User", back_populates="budget_goals")
+
+    def __repr__(self):
+        return f"<BudgetGoal(id={self.id}, name='{self.name}', target={self.target_amount})>"
+
+
 # Database configuration
 def get_data_dir():
     """Get the data directory - check multiple possible locations"""
@@ -137,13 +377,22 @@ def init_db():
     """Initialize database - create all tables and run lightweight migrations."""
     engine = create_engine_instance()
     Base.metadata.create_all(engine)
-    # Add exercise_id column to workouts if upgrading from an older schema
+    # Lightweight ALTER TABLE migrations for schema upgrades on existing databases
+    _migrations = [
+        "ALTER TABLE workouts ADD COLUMN exercise_id TEXT",
+        "ALTER TABLE users ADD COLUMN active_project_id INTEGER",
+        # tasks.project_id: nullable temporarily so old rows survive; migration
+        # in main.py startup_event assigns them to the user's Personal project.
+        "ALTER TABLE tasks ADD COLUMN project_id INTEGER",
+        "ALTER TABLE plans ADD COLUMN project_id INTEGER",
+    ]
     with engine.connect() as conn:
-        try:
-            conn.execute(text("ALTER TABLE workouts ADD COLUMN exercise_id TEXT"))
-            conn.commit()
-        except Exception:
-            pass  # Column already exists
+        for stmt in _migrations:
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
     return engine
 
 

@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
-import 'screens/home_screen.dart';
-import 'screens/history_screen.dart';
-import 'screens/progress_screen.dart';
-import 'screens/workout_management_screen.dart';
-import 'screens/login_screen.dart';
-import 'services/auth_service.dart';
-import 'services/api_service.dart';
+import 'apps/hub/hub_screen.dart';
+import 'apps/hub/login_screen.dart';
+import 'apps/workout/screens/home_screen.dart';
+import 'apps/workout/screens/history_screen.dart';
+import 'apps/workout/screens/progress_screen.dart';
+import 'apps/workout/screens/workout_management_screen.dart';
+import 'apps/tasks/screens/task_todo_screen.dart';
+import 'apps/tasks/screens/task_calendar_screen.dart';
+import 'apps/tasks/screens/task_gantt_screen.dart';
+import 'apps/tasks/screens/task_plans_screen.dart';
+import 'apps/budget/screens/budget_home_screen.dart';
+import 'shared/services/auth_service.dart';
+
 
 void main() {
   runApp(const WorkoutApp());
@@ -17,7 +23,7 @@ class WorkoutApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Workout Routine',
+      title: 'Hub',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF4A7FA5), // muted steel blue
@@ -27,11 +33,20 @@ class WorkoutApp extends StatelessWidget {
       ),
       home: const AuthGate(),
       routes: {
+        '/hub': (context) => const HubScreen(),
+        '/login': (context) => const LoginScreen(),
+        // Workout sub-app
         '/home': (context) => const HomeScreen(),
         '/history': (context) => const HistoryScreen(),
         '/progress': (context) => const ProgressScreen(),
         '/manage-workouts': (context) => const WorkoutManagementScreen(),
-        '/login': (context) => const LoginScreen(),
+        // Tasks sub-app
+        '/tasks': (context) => const TaskTodoScreen(),
+        '/tasks/calendar': (context) => const TaskCalendarScreen(),
+        '/tasks/gantt': (context) => const TaskGanttScreen(),
+        '/tasks/plans': (context) => const TaskPlansScreen(),
+        // Budget sub-app
+        '/budget': (context) => const BudgetHomeScreen(),
       },
     );
   }
@@ -80,7 +95,7 @@ class _AuthGateState extends State<AuthGate> {
 
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
-        builder: (_) => loggedIn ? const HomeScreen() : const LoginScreen(),
+        builder: (_) => loggedIn ? const HubScreen() : const LoginScreen(),
       ),
     );
   }

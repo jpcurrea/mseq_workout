@@ -1,11 +1,13 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import '../models/workout.dart';
+import '../../apps/workout/models/workout.dart';
 import 'auth_service.dart';
 
 class ApiService {
-  // static const String baseUrl = 'https://workout-backend-h6pd.onrender.com';
-  static const String baseUrl = 'https://workout-backend-h6pd.onrender.com';
+  static const String baseUrl = String.fromEnvironment(
+    'BACKEND_URL',
+    defaultValue: 'https://workout-backend-h6pd.onrender.com',
+  );
 
   static Future<Map<String, String>> _headers() async {
     final token = await AuthService.getToken();
