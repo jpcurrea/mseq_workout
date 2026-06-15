@@ -176,51 +176,116 @@ class _TaskCompletionsScreenState extends State<TaskCompletionsScreen> {
           final r = _rows[i];
           final tags = (r['tags'] as String?)?.trim();
           final skipped = (r['status']?.toString() ?? 'completed') == 'skipped';
-          return ListTile(
+          final sessions = (r['work_sessions'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+          final note = (r['note'] as String?)?.trim();
+
+          final titleRow = Row(
+            children: [
+              Flexible(child: Text(r['title']?.toString() ?? 'Untitled')),
+              if (skipped)
+                Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.orange[50],
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.orange[200]!),
+                    ),
+                    child: Text(
+                      'Skipped',
+                      style: TextStyle(fontSize: 10, color: Colors.orange[800], fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ),
+            ],
+          );
+
+          final subtitleCol = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(_fmtDate(r['completed_at'] as String?)),
+              const SizedBox(height: 2),
+              Text(
+                'Est ${_fmtMinutes(r['estimated_minutes'] as num?)} · '
+                'Actual ${_fmtMinutes(r['actual_minutes'] as num?)}',
+                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+              ),
+              if (tags != null && tags.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(tags, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                ),
+              if (note != null && note.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.notes, size: 12, color: Colors.grey[500]),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          note,
+                          style: TextStyle(fontSize: 12, color: Colors.grey[700], fontStyle: FontStyle.italic),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          );
+
+          if (sessions.isEmpty) {
+            return ListTile(
+              leading: Icon(
+                skipped ? Icons.skip_next : Icons.check_circle,
+                color: skipped ? Colors.orange : Colors.green,
+              ),
+              title: titleRow,
+              subtitle: subtitleCol,
+              trailing: skipped ? null : _latenessChip(r['lateness_minutes'] as num?),
+              isThreeLine: true,
+            );
+          }
+
+          return ExpansionTile(
             leading: Icon(
               skipped ? Icons.skip_next : Icons.check_circle,
               color: skipped ? Colors.orange : Colors.green,
             ),
-            title: Row(
-              children: [
-                Flexible(child: Text(r['title']?.toString() ?? 'Untitled')),
-                if (skipped)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 6),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: Colors.orange[50],
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: Colors.orange[200]!),
-                      ),
-                      child: Text(
-                        'Skipped',
-                        style: TextStyle(fontSize: 10, color: Colors.orange[800], fontWeight: FontWeight.w600),
+            title: titleRow,
+            subtitle: subtitleCol,
+            trailing: skipped ? null : _latenessChip(r['lateness_minutes'] as num?),
+            childrenPadding: const EdgeInsets.only(left: 56, right: 16, bottom: 8),
+            children: sessions.map<Widget>((ws) {
+              final start = _fmtDate(ws['started_at'] as String?);
+              final end = ws['ended_at'] != null ? _fmtDate(ws['ended_at'] as String?) : 'in progress';
+              final dur = _fmtMinutes(ws['duration_minutes'] as num?);
+              final notes = (ws['notes'] as String?)?.trim();
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.timer_outlined, size: 14, color: Colors.grey),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('$start → $end  ($dur)',
+                              style: const TextStyle(fontSize: 12)),
+                          if (notes != null && notes.isNotEmpty)
+                            Text(notes,
+                                style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                        ],
                       ),
                     ),
-                  ),
-              ],
-            ),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(_fmtDate(r['completed_at'] as String?)),
-                const SizedBox(height: 2),
-                Text(
-                  'Est ${_fmtMinutes(r['estimated_minutes'] as num?)} · '
-                  'Actual ${_fmtMinutes(r['actual_minutes'] as num?)}',
-                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                  ],
                 ),
-                if (tags != null && tags.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(tags, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
-                  ),
-              ],
-            ),
-            trailing: skipped ? null : _latenessChip(r['lateness_minutes'] as num?),
-            isThreeLine: true,
+              );
+            }).toList(),
           );
         },
       ),

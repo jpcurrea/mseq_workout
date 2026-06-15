@@ -509,8 +509,37 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
   // ── Preview: task operations ───────────────────────────────────────────────
 
   Future<void> _toggleComplete(Task task) async {
+    String? note;
+    if (!task.isCompleted) {
+      final ctrl = TextEditingController();
+      note = await showDialog<String>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: Text('Complete "${task.title}"'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: 'Note (optional)',
+              hintText: 'Any observations or follow-ups…',
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => Navigator.pop(context, ctrl.text.trim()),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, ctrl.text.trim()),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      );
+      if (note == null) return;
+    }
     try {
-      await TaskApiService.toggleComplete(task.id);
+      await TaskApiService.toggleComplete(task.id, note: note?.isEmpty == true ? null : note);
       await _load();
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));

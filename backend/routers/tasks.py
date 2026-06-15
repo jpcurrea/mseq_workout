@@ -5,6 +5,7 @@ import datetime
 import csv
 import difflib
 import io
+import json
 import math
 import re
 from typing import Any, Dict, List, Optional
@@ -588,6 +589,8 @@ async def list_completions(
             "estimated_minutes": c.duration_minutes,
             "actual_minutes": c.actual_minutes,
             "lateness_minutes": _completion_lateness_minutes(c),
+            "note": c.note,
+            "work_sessions": json.loads(c.work_sessions_json) if c.work_sessions_json else [],
         }
         for c in rows
     ]
@@ -953,19 +956,41 @@ def _mark_task_done(
     session: Session,
     now: datetime.datetime,
     status: str,
+    note: Optional[str] = None,
 ):
-    """Close the task (completed or skipped), record an immutable history row,
-    and spawn the next occurrence if the task is recurring."""
-    # Close any active work session first
+    """Close the task (completed or skipped) and record an immutable history row.
+
+    For recurring tasks the same task object is reset in-place with the next
+    due date so only one Task row ever exists per recurring item.  The work
+    sessions from the just-finished occurrence are deleted after their total
+    duration has been captured in the TaskCompletion row.
+
+    For non-recurring tasks the task is simply marked completed.
+    """
+    # Close any active work session first so its duration is counted.
     active = next((s for s in task.work_sessions if s.ended_at is None), None)
     if active:
         active.ended_at = now
 
-    task.is_completed = True
-    task.completed_at = now
+    # Capture actual duration before we potentially delete sessions.
+    actual = _actual_duration_minutes(task)
 
-    # Record an immutable completion-history row (survives edits/deletes and
-    # captures every recurrence occurrence).
+    # Snapshot every completed work session so history is permanent.
+    sessions_snapshot = [
+        {
+            "started_at": ws.started_at.isoformat(),
+            "ended_at": ws.ended_at.isoformat() if ws.ended_at else None,
+            "duration_minutes": round(
+                (ws.ended_at - ws.started_at).total_seconds() / 60.0, 2
+            ) if ws.ended_at else None,
+            "notes": ws.notes,
+        }
+        for ws in task.work_sessions
+        if ws.ended_at is not None
+    ]
+
+    # Record an immutable completion-history row (survives future edits and
+    # captures every individual recurrence occurrence).
     session.add(TaskCompletion(
         task_id=task.id,
         user_id=user_id,
@@ -974,32 +999,36 @@ def _mark_task_done(
         completed_at=now,
         due_date=task.due_date,
         duration_minutes=task.duration_minutes,
-        actual_minutes=_actual_duration_minutes(task),
+        actual_minutes=actual,
         tags=", ".join(t.name for t in task.tags) if task.tags else None,
         status=status,
+        note=note or None,
+        work_sessions_json=json.dumps(sessions_snapshot) if sessions_snapshot else None,
     ))
 
-    # If recurring, create next occurrence
     if task.is_recurring and task.recurrence_rule and task.due_date:
-        next_due = _next_due_date(task.due_date, task.recurrence_rule)
-        next_task = Task(
-            user_id=user_id,
-            project_id=task.project_id,
-            title=task.title,
-            description=task.description,
-            due_date=next_due,
-            duration_minutes=task.duration_minutes,
-            parent_task_id=task.parent_task_id,
-            is_recurring=True,
-            recurrence_rule=task.recurrence_rule,
-        )
-        next_task.tags = list(task.tags)
-        session.add(next_task)
+        # Reset the task in-place: advance the deadline by one interval and
+        # clear completion state so it reappears in the todo list.
+        task.due_date = _next_due_date(task.due_date, task.recurrence_rule)
+        task.is_completed = False
+        task.completed_at = None
+        # Delete work sessions from the finished occurrence — their total is
+        # already captured in TaskCompletion.actual_minutes above.
+        for ws in list(task.work_sessions):
+            session.delete(ws)
+    else:
+        task.is_completed = True
+        task.completed_at = now
+
+
+class CompleteBody(BaseModel):
+    note: Optional[str] = None
 
 
 @tasks_router.post("/{task_id}/complete")
 async def toggle_complete(
     task_id: int,
+    body: CompleteBody = CompleteBody(),
     user_id: int = Depends(get_current_user_id),
     session: Session = Depends(get_session),
 ):
@@ -1011,7 +1040,7 @@ async def toggle_complete(
         task.is_completed = False
         task.completed_at = None
     else:
-        _mark_task_done(task, user_id, session, now, status="completed")
+        _mark_task_done(task, user_id, session, now, status="completed", note=body.note)
 
     task.updated_at = now
     session.commit()
@@ -1021,6 +1050,7 @@ async def toggle_complete(
 @tasks_router.post("/{task_id}/skip")
 async def skip_task(
     task_id: int,
+    body: CompleteBody = CompleteBody(),
     user_id: int = Depends(get_current_user_id),
     session: Session = Depends(get_session),
 ):
@@ -1028,7 +1058,7 @@ async def skip_task(
     recurring task to its next occurrence) but is recorded as 'skipped'."""
     task = _load_task(task_id, user_id, session)
     now = datetime.datetime.utcnow()
-    _mark_task_done(task, user_id, session, now, status="skipped")
+    _mark_task_done(task, user_id, session, now, status="skipped", note=body.note)
     task.updated_at = now
     session.commit()
     return _serialize_task(task, now)

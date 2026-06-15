@@ -165,14 +165,22 @@ class TaskApiService {
     if (r.statusCode != 200) throw _err(r, 'Failed to delete task');
   }
 
-  static Future<Task> toggleComplete(int id) async {
-    final r = await http.post(Uri.parse('$_baseUrl/tasks/$id/complete'), headers: await _headers());
+  static Future<Task> toggleComplete(int id, {String? note}) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/tasks/$id/complete'),
+      headers: await _headers(),
+      body: json.encode({if (note != null && note.isNotEmpty) 'note': note}),
+    );
     if (r.statusCode == 200) return Task.fromJson(json.decode(r.body));
     throw _err(r, 'Failed to toggle complete');
   }
 
-  static Future<Task> skipTask(int id) async {
-    final r = await http.post(Uri.parse('$_baseUrl/tasks/$id/skip'), headers: await _headers());
+  static Future<Task> skipTask(int id, {String? note}) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/tasks/$id/skip'),
+      headers: await _headers(),
+      body: json.encode({if (note != null && note.isNotEmpty) 'note': note}),
+    );
     if (r.statusCode == 200) return Task.fromJson(json.decode(r.body));
     throw _err(r, 'Failed to skip task');
   }

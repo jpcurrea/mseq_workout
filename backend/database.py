@@ -338,6 +338,8 @@ class TaskCompletion(Base):
     actual_minutes = Column(Float, nullable=True)      # measured from work sessions
     tags = Column(String, nullable=True)               # comma-joined snapshot
     status = Column(String, nullable=False, default="completed")  # "completed" | "skipped"
+    note = Column(Text, nullable=True)                 # optional end-of-task note
+    work_sessions_json = Column(Text, nullable=True)   # JSON array of {started_at, ended_at, duration_minutes, notes}
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     def __repr__(self):
@@ -462,6 +464,8 @@ def init_db():
         "ALTER TABLE users ADD COLUMN llm_api_base_url TEXT",
         "ALTER TABLE users ADD COLUMN llm_model TEXT",
         "ALTER TABLE task_completions ADD COLUMN status TEXT DEFAULT 'completed'",
+        "ALTER TABLE task_completions ADD COLUMN work_sessions_json TEXT",
+        "ALTER TABLE task_completions ADD COLUMN note TEXT",
     ]
     with engine.connect() as conn:
         for stmt in _migrations:

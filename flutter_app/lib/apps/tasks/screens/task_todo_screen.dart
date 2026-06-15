@@ -112,9 +112,43 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     }
   }
 
+  Future<String?> _askCompletionNote(String taskTitle) async {
+    final ctrl = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Complete "$taskTitle"'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            labelText: 'Note (optional)',
+            hintText: 'Any observations or follow-ups…',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) => Navigator.pop(context, ctrl.text.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, ctrl.text.trim()),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _toggleComplete(Task task) async {
+    // Only prompt for a note when marking done (not when un-completing).
+    String? note;
+    if (!task.isCompleted) {
+      note = await _askCompletionNote(task.title);
+      if (note == null) return; // user cancelled
+    }
     try {
-      final updated = await TaskApiService.toggleComplete(task.id);
+      final updated = await TaskApiService.toggleComplete(task.id, note: note?.isEmpty == true ? null : note);
       setState(() {
         final idx = _tasks.indexWhere((t) => t.id == task.id);
         if (idx >= 0) _tasks[idx] = updated;
@@ -128,10 +162,10 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   }
 
   Future<void> _skipTask(Task task) async {
+    final note = await _askCompletionNote(task.title);
+    if (note == null) return; // user cancelled
     try {
-      await TaskApiService.skipTask(task.id);
-      // Skipping closes the current instance and (for recurring tasks) spawns
-      // the next occurrence, so reload to reflect both changes.
+      await TaskApiService.skipTask(task.id, note: note.isEmpty ? null : note);
       await _load();
     } catch (e) {
       _showError(e.toString());
