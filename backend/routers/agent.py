@@ -377,6 +377,21 @@ def _build_project_context(
             plans_query = plans_query.filter(Plan.id == plan_id)
         plans = plans_query.order_by(Plan.updated_at.desc()).limit(10).all()
 
+        # When a specific plan is open, list the OTHER plans in this project
+        # (id + title only) so the agent knows they exist and can pull one in
+        # full via the read_plan tool when relevant (e.g. read a 5-year plan to
+        # draft a year-1 plan). Read-only; it cannot write to these.
+        other_plans: List[Dict[str, object]] = []
+        if plan_id is not None:
+            siblings = (
+                session.query(Plan)
+                .filter(Plan.project_id == project_id, Plan.id != plan_id)
+                .order_by(Plan.updated_at.desc())
+                .limit(50)
+                .all()
+            )
+            other_plans = [{"id": p.id, "title": p.title} for p in siblings]
+
         return {
             "mode": "planning",
             "project_id": project_id,
@@ -390,6 +405,7 @@ def _build_project_context(
                 }
                 for p in plans
             ],
+            "other_plans": other_plans,
         }
 
     completed = (
@@ -454,6 +470,10 @@ SCOPE
   action you did not perform via a tool call.
 - If a request needs data you were not given, say so; do not invent task IDs,
   dates, or facts.
+- Other plans in this project are listed (id + title) under other_plans. You may
+  read any of them with the read_plan tool to inform your work — e.g. consult a
+  high-level/long-term plan while drafting a more specific one. You can read
+  other plans but only write to the current plan.
 - The user may attach files (PDFs, text, images). Use their contents to inform
   planning. Scanned PDFs may be shown to you as page images. If an attachment is
   unreadable or missing, say so rather than guessing its contents.
@@ -767,6 +787,28 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_plan",
+                "description": (
+                    "Read the full markdown content of another plan in THIS project "
+                    "(read-only). Use the id of a plan listed in other_plans, e.g. to "
+                    "consult a high-level plan while drafting a more specific one. You "
+                    "cannot modify other plans."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {
+                            "type": "integer",
+                            "description": "Id of a plan in this project (see other_plans).",
+                        },
+                    },
+                    "required": ["plan_id"],
+                },
+            },
+        },
     ]
 
 
@@ -798,6 +840,9 @@ def _ensure_tag_ids(
 
 
 _TASK_TOKEN_RE = re.compile(r"\{\{task:(\d+)\}\}")
+
+# Tools that only read data — they execute immediately and never require approval.
+_READ_ONLY_TOOLS = {"read_plan"}
 
 
 def _validate_plan_task_tokens(
@@ -1069,6 +1114,23 @@ def _execute_planning_tool_call(
             "title": task.title,
         }
 
+    if name == "read_plan":
+        plan_id = args.get("plan_id")
+        if not isinstance(plan_id, int):
+            raise HTTPException(status_code=400, detail="read_plan requires integer plan_id")
+        plan = session.query(Plan).filter(Plan.id == plan_id, Plan.project_id == project_id).first()
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found in this project")
+        # Read-only: return content even in dry-run/approval mode so the agent
+        # can reason over it. Cap length to keep token usage bounded.
+        return {
+            "ok": True,
+            "action": "read_plan",
+            "plan_id": plan.id,
+            "title": plan.title,
+            "content": (plan.content or "")[:8000],
+        }
+
     raise HTTPException(status_code=400, detail=f"Unsupported tool: {name}")
 
 
@@ -1245,7 +1307,10 @@ async def agent_chat(
                         raise ValueError("Tool arguments must be a JSON object")
 
                     if body.mode == "planning" and body.require_approval:
-                        proposed_tool_calls.append({"name": tool_name, "args": parsed_args})
+                        # Read-only tools don't mutate data, so they execute
+                        # immediately and never go through the approval queue.
+                        if tool_name not in _READ_ONLY_TOOLS:
+                            proposed_tool_calls.append({"name": tool_name, "args": parsed_args})
 
                     result = _execute_planning_tool_call(
                         name=tool_name,
@@ -1254,7 +1319,11 @@ async def agent_chat(
                         default_plan_id=body.plan_id,
                         user_id=user_id,
                         session=session,
-                        dry_run=(body.mode == "planning" and body.require_approval),
+                        dry_run=(
+                            body.mode == "planning"
+                            and body.require_approval
+                            and tool_name not in _READ_ONLY_TOOLS
+                        ),
                     )
                 except Exception as exc:
                     result = {"ok": False, "action": tool_name, "error": str(exc)}
