@@ -320,6 +320,7 @@ class TaskCompletion(Base):
     duration_minutes = Column(Integer, nullable=True)  # estimated, snapshot
     actual_minutes = Column(Float, nullable=True)      # measured from work sessions
     tags = Column(String, nullable=True)               # comma-joined snapshot
+    status = Column(String, nullable=False, default="completed")  # "completed" | "skipped"
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     def __repr__(self):
@@ -443,6 +444,7 @@ def init_db():
         "ALTER TABLE users ADD COLUMN llm_api_key_encrypted TEXT",
         "ALTER TABLE users ADD COLUMN llm_api_base_url TEXT",
         "ALTER TABLE users ADD COLUMN llm_model TEXT",
+        "ALTER TABLE task_completions ADD COLUMN status TEXT DEFAULT 'completed'",
     ]
     with engine.connect() as conn:
         for stmt in _migrations:

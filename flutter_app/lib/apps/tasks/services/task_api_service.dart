@@ -166,6 +166,12 @@ class TaskApiService {
     throw _err(r, 'Failed to toggle complete');
   }
 
+  static Future<Task> skipTask(int id) async {
+    final r = await http.post(Uri.parse('$_baseUrl/tasks/$id/skip'), headers: await _headers());
+    if (r.statusCode == 200) return Task.fromJson(json.decode(r.body));
+    throw _err(r, 'Failed to skip task');
+  }
+
   static Future<void> startSession(int taskId) async {
     final r = await http.post(Uri.parse('$_baseUrl/tasks/$taskId/start'), headers: await _headers());
     if (r.statusCode != 200) throw _err(r, 'Failed to start session');

@@ -175,9 +175,33 @@ class _TaskCompletionsScreenState extends State<TaskCompletionsScreen> {
         itemBuilder: (_, i) {
           final r = _rows[i];
           final tags = (r['tags'] as String?)?.trim();
+          final skipped = (r['status']?.toString() ?? 'completed') == 'skipped';
           return ListTile(
-            leading: const Icon(Icons.check_circle, color: Colors.green),
-            title: Text(r['title']?.toString() ?? 'Untitled'),
+            leading: Icon(
+              skipped ? Icons.skip_next : Icons.check_circle,
+              color: skipped ? Colors.orange : Colors.green,
+            ),
+            title: Row(
+              children: [
+                Flexible(child: Text(r['title']?.toString() ?? 'Untitled')),
+                if (skipped)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: Colors.orange[50],
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.orange[200]!),
+                      ),
+                      child: Text(
+                        'Skipped',
+                        style: TextStyle(fontSize: 10, color: Colors.orange[800], fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
             subtitle: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -195,7 +219,7 @@ class _TaskCompletionsScreenState extends State<TaskCompletionsScreen> {
                   ),
               ],
             ),
-            trailing: _latenessChip(r['lateness_minutes'] as num?),
+            trailing: skipped ? null : _latenessChip(r['lateness_minutes'] as num?),
             isThreeLine: true,
           );
         },

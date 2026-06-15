@@ -26,6 +26,7 @@ class TaskCard extends StatefulWidget {
   final VoidCallback? onToggleExpand;
   final String timeUnit;
   final VoidCallback? onComplete;
+  final VoidCallback? onSkip;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
   final VoidCallback? onStartSession;
@@ -41,6 +42,7 @@ class TaskCard extends StatefulWidget {
     this.onToggleExpand,
     this.timeUnit = 'hours',
     this.onComplete,
+    this.onSkip,
     this.onEdit,
     this.onDelete,
     this.onStartSession,
@@ -206,11 +208,14 @@ class _TaskCardState extends State<TaskCard> {
                             padding: EdgeInsets.zero,
                             onSelected: (v) {
                               if (v == 'edit') widget.onEdit?.call();
+                              if (v == 'skip') widget.onSkip?.call();
                               if (v == 'delete') widget.onDelete?.call();
                             },
-                            itemBuilder: (_) => const [
-                              PopupMenuItem(value: 'edit', child: Text('Edit')),
-                              PopupMenuItem(value: 'delete', child: Text('Delete')),
+                            itemBuilder: (_) => [
+                              const PopupMenuItem(value: 'edit', child: Text('Edit')),
+                              if (task.isRecurring && !task.isCompleted && widget.onSkip != null)
+                                const PopupMenuItem(value: 'skip', child: Text('Skip to next')),
+                              const PopupMenuItem(value: 'delete', child: Text('Delete')),
                             ],
                           ),
                         ],
@@ -621,6 +626,7 @@ class TaskCardTree extends StatelessWidget {
   final Task task;
   final Map<int, bool> activeSessions;
   final void Function(Task)? onComplete;
+  final void Function(Task)? onSkip;
   final void Function(Task)? onEdit;
   final void Function(Task)? onDelete;
   final void Function(Task)? onStartSession;
@@ -646,6 +652,7 @@ class TaskCardTree extends StatelessWidget {
     required this.task,
     this.activeSessions = const {},
     this.onComplete,
+    this.onSkip,
     this.onEdit,
     this.onDelete,
     this.onStartSession,
@@ -670,6 +677,7 @@ class TaskCardTree extends StatelessWidget {
       renderSubtasks: renderSubtasks,
       subtaskSort: subtaskSort,
       onComplete: onComplete != null ? () => onComplete!(task) : null,
+      onSkip: onSkip != null ? () => onSkip!(task) : null,
       onEdit: onEdit != null ? () => onEdit!(task) : null,
       onDelete: onDelete != null ? () => onDelete!(task) : null,
       onStartSession: onStartSession != null ? () => onStartSession!(task) : null,
@@ -678,6 +686,7 @@ class TaskCardTree extends StatelessWidget {
         task: subtask,
         activeSessions: activeSessions,
         onComplete: onComplete,
+        onSkip: onSkip,
         onEdit: onEdit,
         onDelete: onDelete,
         onStartSession: onStartSession,
@@ -703,6 +712,7 @@ class _ExpandableTaskCard extends StatefulWidget {
   final bool renderSubtasks;
   final Comparator<Task>? subtaskSort;
   final VoidCallback? onComplete;
+  final VoidCallback? onSkip;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
   final VoidCallback? onStartSession;
@@ -720,6 +730,7 @@ class _ExpandableTaskCard extends StatefulWidget {
     this.renderSubtasks = true,
     this.subtaskSort,
     this.onComplete,
+    this.onSkip,
     this.onEdit,
     this.onDelete,
     this.onStartSession,
@@ -792,6 +803,7 @@ class _ExpandableTaskCardState extends State<_ExpandableTaskCard> {
           onToggleExpand: _toggleExpand,
           timeUnit: widget.timeUnit,
           onComplete: widget.onComplete,
+          onSkip: widget.onSkip,
           onEdit: widget.onEdit,
           onDelete: widget.onDelete,
           onStartSession: widget.onStartSession,

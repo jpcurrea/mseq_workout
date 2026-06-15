@@ -127,6 +127,17 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     }
   }
 
+  Future<void> _skipTask(Task task) async {
+    try {
+      await TaskApiService.skipTask(task.id);
+      // Skipping closes the current instance and (for recurring tasks) spawns
+      // the next occurrence, so reload to reflect both changes.
+      await _load();
+    } catch (e) {
+      _showError(e.toString());
+    }
+  }
+
   Future<void> _deleteTask(Task task) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -843,6 +854,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
               subtaskSort: subtaskSort,
               timeUnit: _timeUnit,
               onComplete: _toggleComplete,
+              onSkip: _skipTask,
               onEdit: (t) => _openForm(task: t),
               onDelete: _deleteTask,
               onStartSession: _startSession,

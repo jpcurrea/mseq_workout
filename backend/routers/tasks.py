@@ -580,6 +580,7 @@ async def list_completions(
             "task_id": c.task_id,
             "title": c.title,
             "tags": c.tags,
+            "status": c.status or "completed",
             "completed_at": c.completed_at.isoformat() if c.completed_at else None,
             "due_date": c.due_date.isoformat() if c.due_date else None,
             "estimated_minutes": c.duration_minutes,
@@ -612,6 +613,7 @@ async def export_completions(
         "task_id",
         "title",
         "tags",
+        "status",
         "completed_at",
         "due_date",
         "estimated_minutes",
@@ -624,6 +626,7 @@ async def export_completions(
             c.task_id if c.task_id is not None else "",
             c.title or "",
             c.tags or "",
+            c.status or "completed",
             c.completed_at.isoformat() if c.completed_at else "",
             c.due_date.isoformat() if c.due_date else "",
             c.duration_minutes if c.duration_minutes is not None else "",
@@ -942,6 +945,56 @@ async def delete_task(
     return {"message": "Task deleted"}
 
 
+def _mark_task_done(
+    task: Task,
+    user_id: int,
+    session: Session,
+    now: datetime.datetime,
+    status: str,
+):
+    """Close the task (completed or skipped), record an immutable history row,
+    and spawn the next occurrence if the task is recurring."""
+    # Close any active work session first
+    active = next((s for s in task.work_sessions if s.ended_at is None), None)
+    if active:
+        active.ended_at = now
+
+    task.is_completed = True
+    task.completed_at = now
+
+    # Record an immutable completion-history row (survives edits/deletes and
+    # captures every recurrence occurrence).
+    session.add(TaskCompletion(
+        task_id=task.id,
+        user_id=user_id,
+        project_id=task.project_id,
+        title=task.title,
+        completed_at=now,
+        due_date=task.due_date,
+        duration_minutes=task.duration_minutes,
+        actual_minutes=_actual_duration_minutes(task),
+        tags=", ".join(t.name for t in task.tags) if task.tags else None,
+        status=status,
+    ))
+
+    # If recurring, create next occurrence
+    if task.is_recurring and task.recurrence_rule and task.due_date:
+        next_due = _next_due_date(task.due_date, task.recurrence_rule)
+        next_task = Task(
+            user_id=user_id,
+            project_id=task.project_id,
+            title=task.title,
+            description=task.description,
+            due_date=next_due,
+            duration_minutes=task.duration_minutes,
+            parent_task_id=task.parent_task_id,
+            is_recurring=True,
+            recurrence_rule=task.recurrence_rule,
+        )
+        next_task.tags = list(task.tags)
+        session.add(next_task)
+
+
 @tasks_router.post("/{task_id}/complete")
 async def toggle_complete(
     task_id: int,
@@ -956,45 +1009,24 @@ async def toggle_complete(
         task.is_completed = False
         task.completed_at = None
     else:
-        # Complete — close any active work session first
-        active = next((s for s in task.work_sessions if s.ended_at is None), None)
-        if active:
-            active.ended_at = now
+        _mark_task_done(task, user_id, session, now, status="completed")
 
-        task.is_completed = True
-        task.completed_at = now
+    task.updated_at = now
+    session.commit()
+    return _serialize_task(task, now)
 
-        # Record an immutable completion-history row (survives edits/deletes and
-        # captures every recurrence occurrence).
-        session.add(TaskCompletion(
-            task_id=task.id,
-            user_id=user_id,
-            project_id=task.project_id,
-            title=task.title,
-            completed_at=now,
-            due_date=task.due_date,
-            duration_minutes=task.duration_minutes,
-            actual_minutes=_actual_duration_minutes(task),
-            tags=", ".join(t.name for t in task.tags) if task.tags else None,
-        ))
 
-        # If recurring, create next occurrence
-        if task.is_recurring and task.recurrence_rule and task.due_date:
-            next_due = _next_due_date(task.due_date, task.recurrence_rule)
-            next_task = Task(
-                user_id=user_id,
-                project_id=task.project_id,
-                title=task.title,
-                description=task.description,
-                due_date=next_due,
-                duration_minutes=task.duration_minutes,
-                parent_task_id=task.parent_task_id,
-                is_recurring=True,
-                recurrence_rule=task.recurrence_rule,
-            )
-            next_task.tags = list(task.tags)
-            session.add(next_task)
-
+@tasks_router.post("/{task_id}/skip")
+async def skip_task(
+    task_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Skip the current task instance: behaves like complete (advances a
+    recurring task to its next occurrence) but is recorded as 'skipped'."""
+    task = _load_task(task_id, user_id, session)
+    now = datetime.datetime.utcnow()
+    _mark_task_done(task, user_id, session, now, status="skipped")
     task.updated_at = now
     session.commit()
     return _serialize_task(task, now)
