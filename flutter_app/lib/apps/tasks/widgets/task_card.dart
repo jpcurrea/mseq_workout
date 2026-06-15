@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import '../models/task.dart';
+import '../services/task_api_service.dart';
 import '../widgets/urgency_color.dart';
 
 /// Three view modes for task lists.
@@ -57,7 +59,26 @@ class _TaskCardState extends State<TaskCard> {
   /// True when the user tapped an individual card to expand it from preview mode.
   bool _isCardExpanded = false;
 
+  // Completion history (loaded once when the full card is first shown).
+  List<Map<String, dynamic>>? _completions;
+  bool _historyExpanded = false;
+  bool _historyLoading = false;
+
   Color get _urgencyColor => urgencyColor(widget.task.startBy, widget.task.durationMinutes);
+
+  void _maybeLoadHistory() {
+    final task = widget.task;
+    if (_completions != null || _historyLoading) return;
+    if (task.projectId == null) return;
+    setState(() => _historyLoading = true);
+    TaskApiService.getCompletions(projectId: task.projectId!, taskId: task.id)
+        .then((rows) {
+          if (mounted) setState(() { _completions = rows; _historyLoading = false; });
+        })
+        .catchError((_) {
+          if (mounted) setState(() { _completions = []; _historyLoading = false; });
+        });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -141,6 +162,7 @@ class _TaskCardState extends State<TaskCard> {
   Widget _buildFullCard(BuildContext context) {
     final task = widget.task;
     final indent = widget.depth * 16.0;
+    _maybeLoadHistory();
 
     return Padding(
       padding: EdgeInsets.only(left: indent, bottom: 8),
@@ -269,6 +291,23 @@ class _TaskCardState extends State<TaskCard> {
                           child: _PunctualityBadge(task: task),
                         ),
 
+                      // Completion history table (recurring / any task with history)
+                      if (_historyLoading)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 6, left: 30),
+                          child: SizedBox(height: 16, width: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2)),
+                        )
+                      else if (_completions != null && _completions!.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6, left: 30),
+                          child: _CompletionHistoryTable(
+                            rows: _completions!,
+                            expanded: _historyExpanded,
+                            onToggle: () => setState(() => _historyExpanded = !_historyExpanded),
+                          ),
+                        ),
+
                       // Start / Stop button + subtask expand
                       Padding(
                         padding: const EdgeInsets.only(top: 6, left: 30),
@@ -330,6 +369,140 @@ class _TaskCardState extends State<TaskCard> {
 }
 
 // ── Sub-widgets ───────────────────────────────────────────────────────────────
+
+/// Collapsible completion history table shown in the expanded task card.
+class _CompletionHistoryTable extends StatelessWidget {
+  final List<Map<String, dynamic>> rows;
+  final bool expanded;
+  final VoidCallback onToggle;
+
+  const _CompletionHistoryTable({
+    required this.rows,
+    required this.expanded,
+    required this.onToggle,
+  });
+
+  static final _dateFmt = DateFormat('MMM d, y');
+
+  String _fmtDate(String? iso) {
+    if (iso == null) return '—';
+    final dt = DateTime.tryParse(iso);
+    return dt == null ? iso : _dateFmt.format(dt.toLocal());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Header toggle row
+        GestureDetector(
+          onTap: onToggle,
+          behavior: HitTestBehavior.opaque,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(expanded ? Icons.expand_less : Icons.expand_more,
+                  size: 16, color: Colors.grey[600]),
+              const SizedBox(width: 4),
+              Text(
+                'History (${rows.length})',
+                style: TextStyle(fontSize: 12, color: Colors.grey[600], fontWeight: FontWeight.w500),
+              ),
+            ],
+          ),
+        ),
+        if (expanded) ...[
+          const SizedBox(height: 6),
+          Table(
+            columnWidths: const {
+              0: IntrinsicColumnWidth(),   // status icon
+              1: IntrinsicColumnWidth(),   // date
+              2: FlexColumnWidth(),        // note
+            },
+            defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+            children: [
+              // Header row
+              TableRow(
+                decoration: BoxDecoration(
+                  border: Border(bottom: BorderSide(color: Colors.grey[300]!)),
+                ),
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4, right: 8),
+                    child: Text('', style: TextStyle(fontSize: 10, color: Colors.grey[500])),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4, right: 12),
+                    child: Text('Date', style: TextStyle(fontSize: 10, color: Colors.grey[500], fontWeight: FontWeight.w600)),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text('Note', style: TextStyle(fontSize: 10, color: Colors.grey[500], fontWeight: FontWeight.w600)),
+                  ),
+                ],
+              ),
+              // Data rows
+              for (final r in rows) ...[
+                TableRow(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+                      child: _statusIcon(r['status'] as String?),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Text(
+                        _fmtDate(r['completed_at'] as String?),
+                        style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurface),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Text(
+                        (r['note'] as String?)?.trim().isNotEmpty == true
+                            ? r['note'] as String
+                            : '',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey[600],
+                          fontStyle: (r['note'] as String?)?.trim().isNotEmpty == true
+                              ? FontStyle.normal
+                              : FontStyle.italic,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _statusIcon(String? status) {
+    switch (status) {
+      case 'skipped':
+        return const Tooltip(
+          message: 'Skipped',
+          child: Icon(Icons.close, size: 14, color: Colors.orange),
+        );
+      case 'completed':
+        return const Tooltip(
+          message: 'Completed',
+          child: Icon(Icons.check, size: 14, color: Colors.green),
+        );
+      default:
+        return Tooltip(
+          message: 'Unknown',
+          child: Icon(Icons.check_box_outline_blank, size: 14, color: Colors.grey[400]),
+        );
+    }
+  }
+}
 
 /// Formats a minute count for display, honoring the user's time-unit preference.
 String formatTaskDuration(int minutes, String timeUnit) {

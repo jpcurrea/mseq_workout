@@ -564,15 +564,22 @@ def _completion_lateness_minutes(c: TaskCompletion) -> Optional[float]:
 @tasks_router.get("/completions")
 async def list_completions(
     project_id: int,
+    task_id: Optional[int] = None,
     limit: int = 500,
     user_id: int = Depends(get_current_user_id),
     session: Session = Depends(get_session),
 ):
-    """Chronological record of every task completion in the project."""
+    """Chronological record of every task completion in the project.
+    Optionally filter to a single task with task_id."""
     _assert_project_member(project_id, user_id, session)
-    rows = (
+    query = (
         session.query(TaskCompletion)
         .filter(TaskCompletion.project_id == project_id)
+    )
+    if task_id is not None:
+        query = query.filter(TaskCompletion.task_id == task_id)
+    rows = (
+        query
         .order_by(TaskCompletion.completed_at.desc())
         .limit(limit)
         .all()
