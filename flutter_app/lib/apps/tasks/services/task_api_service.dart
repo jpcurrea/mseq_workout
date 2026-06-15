@@ -26,6 +26,11 @@ class TaskApiService {
   }
 
   static Exception _err(http.Response r, String fallback) {
+    if (r.statusCode == 401) {
+      // Token is invalid or expired — clear the session and bounce to login.
+      AuthService.handleUnauthorized();
+      return Exception('Session expired — please sign in again.');
+    }
     try {
       final body = json.decode(r.body);
       if (body is Map && body['detail'] != null) return Exception(body['detail']);

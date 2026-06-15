@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -7,6 +8,49 @@ class AuthService {
   static const String _tokenKey = 'auth_token';
   static const String _rememberMeKey = 'remember_me';
   static const _storage = FlutterSecureStorage();
+
+  /// Global navigator key so services can redirect to login on auth failures.
+  static final GlobalKey<NavigatorState> navigatorKey =
+      GlobalKey<NavigatorState>();
+
+  /// Global messenger key so services can surface a SnackBar that survives the
+  /// redirect to the login screen.
+  static final GlobalKey<ScaffoldMessengerState> messengerKey =
+      GlobalKey<ScaffoldMessengerState>();
+
+  /// Guards against multiple concurrent redirects when several API calls fail
+  /// with 401 at once.
+  static bool _handlingUnauthorized = false;
+
+  /// Called when a backend request returns 401: clears the stale token, tells
+  /// the user their session expired, and sends them back to the login screen.
+  static Future<void> handleUnauthorized() async {
+    if (_handlingUnauthorized) return;
+    _handlingUnauthorized = true;
+    try {
+      await clearToken();
+      final nav = navigatorKey.currentState;
+      if (nav != null) {
+        nav.pushNamedAndRemoveUntil(
+          '/login',
+          (route) => false,
+          arguments: {'reason': 'session_expired'},
+        );
+      }
+      final messenger = messengerKey.currentState;
+      if (messenger != null) {
+        messenger.hideCurrentSnackBar();
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Your session expired. Please sign in again.'),
+            duration: Duration(seconds: 5),
+          ),
+        );
+      }
+    } finally {
+      _handlingUnauthorized = false;
+    }
+  }
 
   // URL injected at build time via --dart-define=BACKEND_URL=...
   // Defaults to production when not specified.

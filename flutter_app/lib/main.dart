@@ -25,6 +25,8 @@ class WorkoutApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Hub',
+      navigatorKey: AuthService.navigatorKey,
+      scaffoldMessengerKey: AuthService.messengerKey,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF4A7FA5), // muted steel blue

@@ -11,6 +11,16 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   bool _isLoading = false;
   bool _rememberMe = false;
+  bool _sessionExpired = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is Map && args['reason'] == 'session_expired') {
+      _sessionExpired = true;
+    }
+  }
 
   Future<void> _handleSignIn() async {
     setState(() => _isLoading = true);
@@ -55,6 +65,31 @@ class _LoginScreenState extends State<LoginScreen> {
                       color: Colors.grey,
                     ),
               ),
+              if (_sessionExpired)
+                Padding(
+                  padding: const EdgeInsets.only(top: 24),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.orange[50],
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.orange[200]!),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.info_outline, size: 20, color: Colors.orange[800]),
+                        const SizedBox(width: 10),
+                        Flexible(
+                          child: Text(
+                            'Your session expired. Please sign in again.',
+                            style: TextStyle(color: Colors.orange[900]),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               const SizedBox(height: 48),
               _isLoading
                   ? const CircularProgressIndicator()
