@@ -90,69 +90,75 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('Today\'s Workout'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        leading: PopupMenuButton<String>(
-          icon: const Icon(Icons.menu),
-          onSelected: (String value) async {
-            switch (value) {
-              case 'manage_workouts':
-                Navigator.pushNamed(context, '/manage-workouts');
-                break;
-              case 'progress':
-                Navigator.pushNamed(context, '/progress');
-                break;
-              case 'refresh':
-                loadWorkouts();
-                break;
-              case 'logout':
-                await AuthService.logout();
-                if (context.mounted) {
-                  Navigator.of(context).pushNamedAndRemoveUntil(
-                    '/login', (route) => false,
-                  );
-                }
-                break;
-            }
-          },
-          itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-            const PopupMenuItem<String>(
-              value: 'manage_workouts',
-              child: ListTile(
-                leading: Icon(Icons.edit),
-                title: Text('Manage Workouts'),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ),
-            const PopupMenuItem<String>(
-              value: 'progress',
-              child: ListTile(
-                leading: Icon(Icons.show_chart),
-                title: Text('Progress Charts'),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ),
-            const PopupMenuItem<String>(
-              value: 'refresh',
-              child: ListTile(
-                leading: Icon(Icons.refresh),
-                title: Text('Refresh Workouts'),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ),
-            const PopupMenuDivider(),
-            const PopupMenuItem<String>(
-              value: 'logout',
-              child: ListTile(
-                leading: Icon(Icons.logout),
-                title: Text('Sign Out'),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ),
-          ],
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(context).pushNamedAndRemoveUntil(
+            '/hub', (route) => false,
+          ),
         ),
         actions: [
           IconButton(
             icon: const Icon(Icons.history),
             onPressed: () => Navigator.pushNamed(context, '/history'),
+          ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.menu),
+            onSelected: (String value) async {
+              switch (value) {
+                case 'manage_workouts':
+                  Navigator.pushNamed(context, '/manage-workouts');
+                  break;
+                case 'progress':
+                  Navigator.pushNamed(context, '/progress');
+                  break;
+                case 'refresh':
+                  loadWorkouts();
+                  break;
+                case 'logout':
+                  await AuthService.logout();
+                  if (context.mounted) {
+                    Navigator.of(context).pushNamedAndRemoveUntil(
+                      '/login', (route) => false,
+                    );
+                  }
+                  break;
+              }
+            },
+            itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+              const PopupMenuItem<String>(
+                value: 'manage_workouts',
+                child: ListTile(
+                  leading: Icon(Icons.edit),
+                  title: Text('Manage Workouts'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'progress',
+                child: ListTile(
+                  leading: Icon(Icons.show_chart),
+                  title: Text('Progress Charts'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'refresh',
+                child: ListTile(
+                  leading: Icon(Icons.refresh),
+                  title: Text('Refresh Workouts'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem<String>(
+                value: 'logout',
+                child: ListTile(
+                  leading: Icon(Icons.logout),
+                  title: Text('Sign Out'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+            ],
           ),
         ],
       ),
