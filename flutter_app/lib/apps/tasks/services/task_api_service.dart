@@ -264,6 +264,12 @@ class TaskApiService {
     if (r.statusCode != 200) throw _err(r, 'Failed to delete plan');
   }
 
+  static Future<List<Map<String, dynamic>>> getPlanHistory(int id) async {
+    final r = await http.get(Uri.parse('$_baseUrl/plans/$id/history'), headers: await _headers());
+    if (r.statusCode == 200) return List<Map<String, dynamic>>.from(json.decode(r.body));
+    throw _err(r, 'Failed to load plan history');
+  }
+
   // ── Calendar / Gantt ───────────────────────────────────────────────────────
 
   static Future<List<Map<String, dynamic>>> getCalendarTasks({required int projectId}) async {

@@ -357,6 +357,109 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     }
   }
 
+  Future<void> _showHistory() async {
+    List<Map<String, dynamic>> revisions;
+    try {
+      revisions = await TaskApiService.getPlanHistory(widget.planId);
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      return;
+    }
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        minChildSize: 0.3,
+        builder: (_, sc) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Row(
+                children: [
+                  const Icon(Icons.history),
+                  const SizedBox(width: 8),
+                  Text('Save history (${revisions.length})',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            if (revisions.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(32),
+                child: Text('No history yet — save the plan to start tracking changes.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey)),
+              )
+            else
+              Expanded(
+                child: ListView.separated(
+                  controller: sc,
+                  padding: const EdgeInsets.all(12),
+                  itemCount: revisions.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (ctx, i) {
+                    final rev = revisions[i];
+                    final savedAt = DateTime.tryParse(rev['saved_at'] ?? '') ?? DateTime.now();
+                    final diff = (rev['diff'] as String? ?? '').trim();
+                    final lines = diff.split('\n');
+                    final added = lines.where((l) => l.startsWith('+')).length;
+                    final removed = lines.where((l) => l.startsWith('-')).length;
+                    return ExpansionTile(
+                      leading: const Icon(Icons.save_outlined, size: 20),
+                      title: Text(
+                        _formatDateTime(savedAt),
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      subtitle: Text(
+                        '+$added  −$removed lines',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Theme.of(ctx).colorScheme.secondary,
+                        ),
+                      ),
+                      children: [
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(10),
+                          color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                          child: SelectableText(
+                            diff,
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 12,
+                              color: Theme.of(ctx).colorScheme.onSurface,
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatDateTime(DateTime dt) {
+    final local = dt.toLocal();
+    final now = DateTime.now();
+    final diff = now.difference(local);
+    final timeStr = '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+    if (diff.inDays == 0) return 'Today $timeStr';
+    if (diff.inDays == 1) return 'Yesterday $timeStr';
+    return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')} $timeStr';
+  }
+
   Future<void> _insertTaskWidget() async {
     List<Task> tasks = [];
     try {
@@ -744,6 +847,11 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Settings',
             onPressed: _showAgentSettings,
+          ),
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: 'Save history',
+            onPressed: _showHistory,
           ),
           // Edit / Preview toggle
           Row(

@@ -3,6 +3,7 @@ Task management routes: tasks, tags, work sessions, plans, and analytics.
 """
 import datetime
 import csv
+import difflib
 import io
 import math
 import re
@@ -20,6 +21,7 @@ from database import (
     Tag,
     WorkSession,
     Plan,
+    PlanRevision,
     Project,
     ProjectMembership,
     task_tag_link,
@@ -1170,7 +1172,21 @@ async def update_plan(
     _assert_can_write(plan.project_id, user_id, session)
     if body.title is not None:
         plan.title = body.title
-    if body.content is not None:
+    if body.content is not None and body.content != plan.content:
+        old_lines = (plan.content or "").splitlines()
+        new_lines = body.content.splitlines()
+        diff_lines = list(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile="before", tofile="after",
+            lineterm="",
+        ))
+        if diff_lines:
+            session.add(PlanRevision(
+                plan_id=plan.id,
+                saved_by=user_id,
+                saved_at=datetime.datetime.utcnow(),
+                diff="\n".join(diff_lines),
+            ))
         plan.content = body.content
     plan.updated_at = datetime.datetime.utcnow()
     session.commit()
@@ -1180,6 +1196,33 @@ async def update_plan(
         "title": plan.title,
         "updated_at": plan.updated_at.isoformat(),
     }
+
+
+@plans_router.get("/{plan_id}/history")
+async def get_plan_history(
+    plan_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    plan = session.query(Plan).filter(Plan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    _assert_project_member(plan.project_id, user_id, session)
+    revisions = (
+        session.query(PlanRevision)
+        .filter(PlanRevision.plan_id == plan_id)
+        .order_by(PlanRevision.saved_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "saved_at": r.saved_at.isoformat(),
+            "saved_by": r.saved_by,
+            "diff": r.diff,
+        }
+        for r in revisions
+    ]
 
 
 @plans_router.delete("/{plan_id}")

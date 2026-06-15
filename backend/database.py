@@ -275,9 +275,26 @@ class Plan(Base):
     user = relationship("User", back_populates="plans")
     project = relationship("Project", back_populates="plans")
     llm_conversations = relationship("LLMConversation", back_populates="plan")
+    revisions = relationship("PlanRevision", back_populates="plan", cascade="all, delete-orphan", order_by="PlanRevision.saved_at")
 
     def __repr__(self):
         return f"<Plan(id={self.id}, title='{self.title}')>"
+
+
+class PlanRevision(Base):
+    """Stores a unified diff of each plan save for history tracking."""
+    __tablename__ = "plan_revisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    plan_id = Column(Integer, ForeignKey("plans.id"), nullable=False, index=True)
+    saved_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    saved_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    diff = Column(Text, nullable=False)  # unified diff (old → new content)
+
+    plan = relationship("Plan", back_populates="revisions")
+
+    def __repr__(self):
+        return f"<PlanRevision(id={self.id}, plan_id={self.plan_id}, saved_at={self.saved_at})>"
 
 
 class LLMConversation(Base):
