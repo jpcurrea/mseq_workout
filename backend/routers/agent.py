@@ -9,12 +9,15 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlparse
 
 import base64
 import binascii
+import hashlib
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -29,8 +32,10 @@ from database import (
     ProjectMembership,
     Tag,
     Task,
+    User,
 )
 from dependencies import get_current_user_id
+from auth import SECRET_KEY
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 _config = Config('.env')
@@ -58,6 +63,47 @@ def _llm_runtime_config() -> tuple[str, str, Optional[str], float]:
     api_key = _env_value("LLM_API_KEY") or _env_value("OPENAI_API_KEY")
     timeout_sec = float(_env_value("LLM_TIMEOUT_SECONDS", "120") or "120")
     return base_url, model, api_key, timeout_sec
+
+
+# ── Per-user BYO-key encryption (Fernet, derived from SECRET_KEY) ─────────────
+# NOTE: SECRET_KEY must be set as a stable env var in production. If it changes
+# (e.g. a random default on each restart), previously stored keys can no longer
+# be decrypted and users must re-enter them.
+def _fernet() -> Fernet:
+    digest = hashlib.sha256(SECRET_KEY.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _encrypt_secret(plaintext: str) -> str:
+    return _fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_secret(token: str) -> Optional[str]:
+    try:
+        return _fernet().decrypt(token.encode("ascii")).decode("utf-8")
+    except (InvalidToken, ValueError, TypeError):
+        return None
+
+
+def _resolve_runtime_for_user(user: Optional[User]) -> tuple[str, str, Optional[str], float, bool]:
+    """Resolve (base_url, model, api_key, timeout, using_user_key).
+
+    A user's own key/base_url/model override the server defaults. When the user
+    supplies their own key, they pay their own provider, so the shared spend cap
+    does not apply (using_user_key=True).
+    """
+    base_url, model, api_key, timeout_sec = _llm_runtime_config()
+    using_user_key = False
+    if user is not None and user.llm_api_key_encrypted:
+        user_key = _decrypt_secret(user.llm_api_key_encrypted)
+        if user_key:
+            api_key = user_key
+            using_user_key = True
+            if user.llm_api_base_url:
+                base_url = user.llm_api_base_url
+            if user.llm_model:
+                model = user.llm_model
+    return base_url, model, api_key, timeout_sec, using_user_key
 
 
 # Approximate pay-per-use pricing (USD per 1M tokens): (input, output).
@@ -322,7 +368,7 @@ def _build_project_context(
             .filter(Task.project_id == project_id)
             .options(selectinload(Task.tags))
             .order_by(Task.updated_at.desc())
-            .limit(30)
+            .limit(150)
             .all()
         )
 
@@ -434,6 +480,20 @@ SAFETY
 ACTIONS & APPROVAL
 - Prefer the smallest set of changes that satisfies the request. Do not delete
   or overwrite existing tasks/plans unless explicitly asked.
+- Before creating a task, check the provided project context for an existing
+  task with the same/similar title. If it already exists, update it instead of
+  creating a duplicate. Never create the same task twice in one request.
+- To remove a task, call delete_task with the exact id from the project
+  context. To clean up duplicates, delete the extras and keep one. Do not
+  "recreate" tasks to fix mistakes — update or delete the existing ones.
+- After you finish your tool calls, always reply to the user in plain text
+  summarizing what you created, updated, or deleted.
+- To embed a task inside a plan document, the task must already exist (create
+  it first and use the returned id). To place tasks INTERSPERSED with text, call
+  write_plan and put a {{task:ID}} token on its own line where each task should
+  appear. For a simple add-to-end, insert_task_into_plan is fine. Never
+  reference a task id you have not seen in the project context or a create_task
+  result — such tokens are rejected.
 - For bulk or destructive changes, describe what you will do and ask for
   confirmation before calling tools.
 - Set durations and due dates realistically; flag when a deadline looks
@@ -493,8 +553,12 @@ async def _call_llm_message(
     messages: List[Dict[str, Any]],
     model: str,
     tools: Optional[List[Dict[str, Any]]] = None,
+    runtime: Optional[tuple[str, str, Optional[str], float]] = None,
 ) -> Dict[str, Any]:
-    base_url, resolved_model, api_key, timeout_sec = _llm_runtime_config()
+    if runtime is not None:
+        base_url, resolved_model, api_key, timeout_sec = runtime
+    else:
+        base_url, resolved_model, api_key, timeout_sec = _llm_runtime_config()
     model = model or resolved_model
 
     if not api_key and not _is_local_base_url(base_url):
@@ -612,8 +676,34 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "delete_task",
+                "description": (
+                    "Permanently delete a task in the current project by its id. "
+                    "Use this to remove duplicate or unwanted tasks. Use the exact "
+                    "id from the provided project context; never guess ids."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "integer"},
+                    },
+                    "required": ["task_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "write_plan",
-                "description": "Replace or append plan markdown content.",
+                "description": (
+                    "Replace or append a plan's markdown content. To embed a task "
+                    "as a live widget INLINE (interspersed with your text), put a "
+                    "{{task:ID}} token on its own line exactly where you want it. "
+                    "Every id must be an EXISTING task in this project (create it "
+                    "first with create_task and use the returned id); referencing a "
+                    "non-existent id is rejected. Prefer this over insert_task_into_plan "
+                    "when you want tasks mixed with explanatory text."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -630,7 +720,11 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "create_plan",
-                "description": "Create a new plan in the current project.",
+                "description": (
+                    "Create a new plan in the current project. You may embed existing "
+                    "tasks inline by placing {{task:ID}} tokens in the content; every "
+                    "id must already exist in this project."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -638,6 +732,38 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                         "content": {"type": "string"},
                     },
                     "required": ["title"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "insert_task_into_plan",
+                "description": (
+                    "Append/prepend a SINGLE existing task widget to a plan without "
+                    "rewriting it. Use this only for simple add-to-end/start cases; "
+                    "to place tasks interspersed with text, use write_plan with inline "
+                    "{{task:ID}} tokens instead. The task must already exist in this "
+                    "project (use create_task first, then pass the returned task_id)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "integer",
+                            "description": "Id of an existing task in this project.",
+                        },
+                        "plan_id": {
+                            "type": "integer",
+                            "description": "Target plan id. Defaults to the current plan if omitted.",
+                        },
+                        "position": {
+                            "type": "string",
+                            "enum": ["end", "start"],
+                            "description": "Where to place the widget. Defaults to end.",
+                        },
+                    },
+                    "required": ["task_id"],
                 },
             },
         },
@@ -669,6 +795,40 @@ def _ensure_tag_ids(
             by_name[key] = tag
         ids.append(tag.id)
     return ids
+
+
+_TASK_TOKEN_RE = re.compile(r"\{\{task:(\d+)\}\}")
+
+
+def _validate_plan_task_tokens(
+    *,
+    content: str,
+    project_id: int,
+    session: Session,
+) -> None:
+    """Ensure every {{task:ID}} token in plan content references a task that
+    actually exists in this project. This lets the agent place task widgets
+    inline (interspersed with text) via write_plan/create_plan while still
+    preventing references to non-existent or other-project tasks."""
+    ids = {int(m.group(1)) for m in _TASK_TOKEN_RE.finditer(content or "")}
+    if not ids:
+        return
+    found = {
+        row[0]
+        for row in session.query(Task.id)
+        .filter(Task.id.in_(ids), Task.project_id == project_id)
+        .all()
+    }
+    missing = sorted(ids - found)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Plan references task id(s) not in this project: "
+                + ", ".join(str(i) for i in missing)
+                + ". Create the task first, then reference its id."
+            ),
+        )
 
 
 def _execute_planning_tool_call(
@@ -770,6 +930,28 @@ def _execute_planning_tool_call(
         session.commit()
         return {"ok": True, "action": "update_task", "task_id": task.id, "title": task.title}
 
+    if name == "delete_task":
+        task_id = args.get("task_id")
+        if not isinstance(task_id, int):
+            raise HTTPException(status_code=400, detail="delete_task requires integer task_id")
+        task = session.query(Task).filter(Task.id == task_id, Task.project_id == project_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found in this project")
+
+        title = task.title
+        if dry_run:
+            return {
+                "ok": True,
+                "action": "delete_task",
+                "dry_run": True,
+                "task_id": task_id,
+                "title": title,
+            }
+
+        session.delete(task)
+        session.commit()
+        return {"ok": True, "action": "delete_task", "task_id": task_id, "title": title}
+
     if name == "write_plan":
         plan_id = args.get("plan_id") if isinstance(args.get("plan_id"), int) else default_plan_id
         if plan_id is None:
@@ -784,6 +966,10 @@ def _execute_planning_tool_call(
             raise HTTPException(status_code=400, detail="write_plan requires non-empty content")
 
         append = bool(args.get("append", False))
+        new_content = (
+            f"{plan.content.rstrip()}\n\n{content}" if append and plan.content else content
+        )
+        _validate_plan_task_tokens(content=new_content, project_id=project_id, session=session)
         if dry_run:
             return {
                 "ok": True,
@@ -806,6 +992,7 @@ def _execute_planning_tool_call(
         if not title:
             raise HTTPException(status_code=400, detail="create_plan requires title")
         content = str(args.get("content") or "")
+        _validate_plan_task_tokens(content=content, project_id=project_id, session=session)
         if dry_run:
             return {
                 "ok": True,
@@ -819,6 +1006,68 @@ def _execute_planning_tool_call(
         session.commit()
         session.refresh(plan)
         return {"ok": True, "action": "create_plan", "plan_id": plan.id, "title": plan.title}
+
+    if name == "insert_task_into_plan":
+        task_id = args.get("task_id")
+        if not isinstance(task_id, int):
+            raise HTTPException(status_code=400, detail="insert_task_into_plan requires integer task_id")
+
+        # The task must already exist in this project — this is what prevents
+        # the agent from embedding non-existent tasks.
+        task = session.query(Task).filter(Task.id == task_id, Task.project_id == project_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found in this project")
+
+        plan_id = args.get("plan_id") if isinstance(args.get("plan_id"), int) else default_plan_id
+        if plan_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="insert_task_into_plan requires plan_id when no default plan is selected",
+            )
+        plan = session.query(Plan).filter(Plan.id == plan_id, Plan.project_id == project_id).first()
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found in this project")
+
+        position = str(args.get("position") or "end").lower()
+        token = f"{{{{task:{task_id}}}}}"
+
+        if dry_run:
+            return {
+                "ok": True,
+                "action": "insert_task_into_plan",
+                "dry_run": True,
+                "task_id": task_id,
+                "plan_id": plan.id,
+                "position": position,
+                "title": task.title,
+            }
+
+        existing = plan.content or ""
+        if token in existing:
+            # Idempotent: don't embed the same task twice.
+            return {
+                "ok": True,
+                "action": "insert_task_into_plan",
+                "task_id": task_id,
+                "plan_id": plan.id,
+                "already_present": True,
+                "title": task.title,
+            }
+
+        if position == "start":
+            plan.content = f"{token}\n\n{existing.lstrip()}" if existing.strip() else token
+        else:
+            plan.content = f"{existing.rstrip()}\n\n{token}" if existing.strip() else token
+        plan.updated_at = datetime.datetime.utcnow()
+        session.commit()
+        return {
+            "ok": True,
+            "action": "insert_task_into_plan",
+            "task_id": task_id,
+            "plan_id": plan.id,
+            "position": position,
+            "title": task.title,
+        }
 
     raise HTTPException(status_code=400, detail=f"Unsupported tool: {name}")
 
@@ -855,6 +1104,7 @@ async def _summarize_history(
     prior_summary: Optional[str],
     messages: List[Dict[str, Any]],
     model: str,
+    runtime: Optional[tuple[str, str, Optional[str], float]] = None,
 ) -> tuple[str, int, int]:
     """Fold older turns into a concise running memory. Returns (text, p_tok, c_tok)."""
     convo_text = "\n".join(
@@ -877,6 +1127,7 @@ async def _summarize_history(
             {"role": "user", "content": user},
         ],
         model=model,
+        runtime=runtime,
     )
     usage = msg.pop("_usage", {}) if isinstance(msg, dict) else {}
     text = msg.get("content") if isinstance(msg, dict) else None
@@ -895,15 +1146,21 @@ async def agent_chat(
 ):
     _assert_project_member(body.project_id, user_id, session)
 
-    # Hard spending cap (pay-per-use guardrail).
+    # Resolve runtime: a user's own key/base_url/model override the server
+    # defaults. BYO-key users pay their own provider, so the shared cap is
+    # only enforced when falling back to the server key.
+    user = session.query(User).filter(User.id == user_id).first()
+    base_url, model, api_key, timeout_sec, using_user_key = _resolve_runtime_for_user(user)
+    runtime = (base_url, model, api_key, timeout_sec)
+
     spend_cap = _spend_cap_usd()
     spent_before = _total_spend_usd(session)
-    if spent_before >= spend_cap:
+    if not using_user_key and spent_before >= spend_cap:
         raise HTTPException(
             status_code=429,
             detail=(
                 f"LLM spending cap reached (${spent_before:.2f} of ${spend_cap:.2f}). "
-                "Increase LLM_SPEND_CAP_USD to continue."
+                "Add your own API key in AI settings, or increase LLM_SPEND_CAP_USD to continue."
             ),
         )
 
@@ -919,8 +1176,6 @@ async def agent_chat(
         plan_id=body.plan_id,
         session=session,
     )
-
-    _, model, _, _ = _llm_runtime_config()
 
     # Resume the single persistent thread for this plan/project (if any).
     convo = _find_conversation(session, user_id, body.mode, body.plan_id, body.project_id)
@@ -962,8 +1217,8 @@ async def agent_chat(
     total_prompt_tokens = 0
     total_completion_tokens = 0
 
-    for _ in range(6):
-        ai_msg = await _call_llm_message(messages=llm_messages, model=model, tools=tool_defs)
+    for _ in range(8):
+        ai_msg = await _call_llm_message(messages=llm_messages, model=model, tools=tool_defs, runtime=runtime)
         if isinstance(ai_msg, dict):
             usage = ai_msg.pop("_usage", None)
             if usage:
@@ -1019,8 +1274,33 @@ async def agent_chat(
             reply = ""
         break
 
-    if reply is None:
-        reply = "I completed the requested actions, but did not produce a final response."
+    # If the loop ended without a usable text reply (e.g. the model kept making
+    # tool calls until the iteration cap, or returned empty content), make one
+    # final call WITHOUT tools so it must summarize what it did in plain text.
+    if (reply is None or not reply.strip()) and executed_actions:
+        llm_messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Stop calling tools. Briefly tell the user, in plain text, what "
+                    "you just changed (created/updated/deleted tasks) and any next steps."
+                ),
+            }
+        )
+        final_msg = await _call_llm_message(messages=llm_messages, model=model, runtime=runtime)
+        if isinstance(final_msg, dict):
+            usage = final_msg.pop("_usage", None)
+            if usage:
+                total_prompt_tokens += usage.get("prompt_tokens", 0)
+                total_completion_tokens += usage.get("completion_tokens", 0)
+            reply = final_msg.get("content") or reply
+
+    if reply is None or not reply.strip():
+        if executed_actions:
+            ok_count = sum(1 for a in executed_actions if a.get("ok"))
+            reply = f"Done. Applied {ok_count} change(s) to your tasks."
+        else:
+            reply = "I completed the requested actions, but did not produce a final response."
 
     history = [m.model_dump() for m in body.messages]
     history.append({"role": "assistant", "content": reply})
@@ -1032,7 +1312,7 @@ async def agent_chat(
         overflow = history[: len(history) - _KEEP_RECENT_MESSAGES]
         recent = history[len(history) - _KEEP_RECENT_MESSAGES:]
         try:
-            new_summary, sp, sc = await _summarize_history(prior_summary, overflow, model)
+            new_summary, sp, sc = await _summarize_history(prior_summary, overflow, model, runtime=runtime)
             total_prompt_tokens += sp
             total_completion_tokens += sc
             stored_messages = recent
@@ -1053,8 +1333,10 @@ async def agent_chat(
     convo.summary = new_summary
     convo.updated_at = now
 
+    # Only the shared (server-key) usage counts toward the spending cap.
+    # BYO-key users bill their own provider, so we don't record it here.
     request_cost = _estimate_cost_usd(model, total_prompt_tokens, total_completion_tokens)
-    if total_prompt_tokens or total_completion_tokens:
+    if not using_user_key and (total_prompt_tokens or total_completion_tokens):
         session.add(LLMUsage(
             user_id=user_id,
             model=model,
@@ -1079,9 +1361,10 @@ async def agent_chat(
             "completed_tasks_considered": context_payload.get("completed_task_count") if isinstance(context_payload, dict) else 0,
         },
         "usage": {
-            "request_cost_usd": round(request_cost, 6),
-            "total_spend_usd": round(spent_before + request_cost, 4),
+            "request_cost_usd": round(request_cost, 6) if not using_user_key else 0.0,
+            "total_spend_usd": round(spent_before + (0.0 if using_user_key else request_cost), 4),
             "spend_cap_usd": spend_cap,
+            "using_own_key": using_user_key,
         },
         "attachment_notes": attachment_notes,
         "conversation_id": convo.id,
@@ -1131,6 +1414,102 @@ async def get_conversation(
         "has_memory": bool(convo.summary),
         "updated_at": convo.updated_at.isoformat() if convo.updated_at else None,
     }
+
+
+class AgentSettingsUpdate(BaseModel):
+    # Provide api_key to set/replace; omit to leave the stored key unchanged.
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    # Set true to remove the stored key and revert to the server default.
+    clear: bool = False
+
+
+def _mask_key_hint(plaintext: Optional[str]) -> Optional[str]:
+    if not plaintext:
+        return None
+    tail = plaintext[-4:] if len(plaintext) >= 4 else plaintext
+    return f"…{tail}"
+
+
+@router.get("/settings")
+async def get_agent_settings(
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Return the user's LLM override status (never the raw key)."""
+    user = session.query(User).filter(User.id == user_id).first()
+    server_base, server_model, _, _ = _llm_runtime_config()
+    has_key = bool(user and user.llm_api_key_encrypted)
+    key_hint = None
+    if has_key:
+        key_hint = _mask_key_hint(_decrypt_secret(user.llm_api_key_encrypted))
+    return {
+        "using_own_key": has_key,
+        "key_hint": key_hint,
+        "base_url": (user.llm_api_base_url if user else None) or server_base,
+        "model": (user.llm_model if user else None) or server_model,
+        "server_model": server_model,
+        "server_base_url": server_base,
+    }
+
+
+@router.put("/settings")
+async def update_agent_settings(
+    body: AgentSettingsUpdate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Set or clear the user's BYO LLM key / base URL / model."""
+    user = session.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if body.clear:
+        user.llm_api_key_encrypted = None
+        user.llm_api_base_url = None
+        user.llm_model = None
+        session.commit()
+        return {"ok": True, "using_own_key": False}
+
+    if body.api_key is not None:
+        key = body.api_key.strip()
+        if key:
+            user.llm_api_key_encrypted = _encrypt_secret(key)
+        # An explicit empty string clears the key.
+        elif key == "":
+            user.llm_api_key_encrypted = None
+
+    if body.base_url is not None:
+        url = body.base_url.strip()
+        user.llm_api_base_url = url or None
+
+    if body.model is not None:
+        m = body.model.strip()
+        user.llm_model = m or None
+
+    session.commit()
+    return {
+        "ok": True,
+        "using_own_key": bool(user.llm_api_key_encrypted),
+        "base_url": user.llm_api_base_url,
+        "model": user.llm_model,
+    }
+
+
+@router.delete("/settings")
+async def delete_agent_settings(
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Remove the user's LLM override and revert to the server default."""
+    user = session.query(User).filter(User.id == user_id).first()
+    if user:
+        user.llm_api_key_encrypted = None
+        user.llm_api_base_url = None
+        user.llm_model = None
+        session.commit()
+    return {"ok": True, "using_own_key": False}
 
 
 @router.post("/planning/apply-actions")

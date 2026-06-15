@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import '../models/task.dart';
 import '../models/project.dart';
@@ -11,6 +11,8 @@ import '../services/task_api_service.dart';
 import '../services/project_api_service.dart';
 import '../services/agent_api_service.dart';
 import '../widgets/task_card.dart';
+import '../widgets/ai_settings_dialog.dart';
+import 'task_form_screen.dart';
 
 class TaskPlansScreen extends StatefulWidget {
   const TaskPlansScreen({super.key});
@@ -210,6 +212,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
   TaskViewMode _previewViewMode = TaskViewMode.topLevelPreview;
   late final TextEditingController _chatCtrl;
   final List<_AgentChatEntry> _chatEntries = [];
+  final _chatScrollCtrl = ScrollController();
   final List<_PendingAttachment> _pendingAttachments = [];
   bool _isSendingChat = false;
   bool _chatExpanded = true;
@@ -239,6 +242,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     _contentCtrl.dispose();
     _chatCtrl.dispose();
     _scrollCtrl.dispose();
+    _chatScrollCtrl.dispose();
     super.dispose();
   }
 
@@ -278,9 +282,25 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
               )));
         _agentHasMemory = convo['has_memory'] == true;
       });
+      _scrollChatToBottom();
     } catch (_) {
       // Non-fatal: a missing/failed restore just starts an empty chat.
     }
+  }
+
+  void _scrollChatToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_chatScrollCtrl.hasClients) return;
+      _chatScrollCtrl.jumpTo(_chatScrollCtrl.position.maxScrollExtent);
+    });
+  }
+
+  Future<void> _copyMessage(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Message copied'), duration: Duration(seconds: 1)),
+    );
   }
 
   Future<void> _save() async {
@@ -356,6 +376,19 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     }
   }
 
+  Future<void> _openTaskEditor(Task task) async {
+    if (_plan == null) return;
+    final saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => TaskFormScreen(
+          editTask: task,
+          projectId: _plan!.projectId,
+        ),
+      ),
+    );
+    if (saved == true) await _load();
+  }
+
   Future<void> _startSession(Task task) async {
     try {
       await TaskApiService.startSession(task.id);
@@ -373,6 +406,13 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
     }
+  }
+
+  Future<void> _openAiSettings() async {
+    await showDialog<bool>(
+      context: context,
+      builder: (_) => const AiSettingsDialog(),
+    );
   }
 
   Future<void> _pickAttachments() async {
@@ -482,6 +522,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       _pendingAttachments.clear();
       _isSendingChat = true;
     });
+    _scrollChatToBottom();
 
     try {
       final payloadMessages = _chatEntries
@@ -500,6 +541,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       setState(() {
         _chatEntries.add(_AgentChatEntry(role: 'assistant', content: res.reply));
       });
+      _scrollChatToBottom();
 
       if (res.attachmentNotes.isNotEmpty && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -576,10 +618,14 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
         return 'Create task: ${args['title'] ?? '(untitled)'}';
       case 'update_task':
         return 'Update task #${args['task_id'] ?? '?'}';
+      case 'delete_task':
+        return 'Delete task #${args['task_id'] ?? '?'}';
       case 'write_plan':
         return 'Write plan content${args['append'] == true ? ' (append)' : ''}';
       case 'create_plan':
         return 'Create plan: ${args['title'] ?? '(untitled)'}';
+      case 'insert_task_into_plan':
+        return 'Embed task #${args['task_id'] ?? '?'} into plan';
       default:
         return '$name ${args.isNotEmpty ? args.toString() : ''}'.trim();
     }
@@ -772,6 +818,12 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
                       height: 16,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
+                  IconButton(
+                    icon: const Icon(Icons.tune, size: 18),
+                    tooltip: 'AI provider settings',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: _openAiSettings,
+                  ),
                   const SizedBox(width: 8),
                   Icon(_chatExpanded ? Icons.expand_more : Icons.chevron_right),
                 ],
@@ -789,6 +841,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
                       ),
                     )
                   : ListView.builder(
+                      controller: _chatScrollCtrl,
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       itemCount: _chatEntries.length,
                       itemBuilder: (_, i) {
@@ -796,17 +849,27 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
                         final isUser = m.role == 'user';
                         return Align(
                           alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-                          child: Container(
-                            margin: const EdgeInsets.only(bottom: 8),
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                            constraints: const BoxConstraints(maxWidth: 560),
-                            decoration: BoxDecoration(
-                              color: isUser
-                                  ? theme.colorScheme.primaryContainer
-                                  : theme.colorScheme.surfaceContainerHighest,
-                              borderRadius: BorderRadius.circular(10),
+                          child: GestureDetector(
+                            onLongPress: () => _copyMessage(m.content),
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                              constraints: const BoxConstraints(maxWidth: 560),
+                              decoration: BoxDecoration(
+                                color: isUser
+                                    ? theme.colorScheme.primaryContainer
+                                    : theme.colorScheme.surfaceContainerHighest,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: SelectableText(
+                                m.content,
+                                contextMenuBuilder: (context, editableState) {
+                                  return AdaptiveTextSelectionToolbar.editableText(
+                                    editableTextState: editableState,
+                                  );
+                                },
+                              ),
                             ),
-                            child: Text(m.content),
                           ),
                         );
                       },
@@ -907,6 +970,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       onComplete: _toggleComplete,
       onStartSession: _startSession,
       onStopSession: _stopSession,
+      onEdit: _openTaskEditor,
     );
   }
 }
@@ -924,6 +988,7 @@ class _PlanPreviewView extends StatelessWidget {
   final Future<void> Function(Task) onComplete;
   final Future<void> Function(Task) onStartSession;
   final Future<void> Function(Task) onStopSession;
+  final Future<void> Function(Task) onEdit;
 
   const _PlanPreviewView({
     required this.content,
@@ -934,6 +999,7 @@ class _PlanPreviewView extends StatelessWidget {
     required this.onComplete,
     required this.onStartSession,
     required this.onStopSession,
+    required this.onEdit,
   });
 
   @override
@@ -978,6 +1044,7 @@ class _PlanPreviewView extends StatelessWidget {
             onComplete: (t) { onComplete(t); },
             onStartSession: (t) { onStartSession(t); },
             onStopSession: (t) { onStopSession(t); },
+            onEdit: (t) { onEdit(t); },
           ),
         ));
       } else {

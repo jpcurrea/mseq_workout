@@ -125,4 +125,44 @@ class AgentApiService {
     }
     throw _err(r, 'Failed to apply planning actions');
   }
+
+  static Future<Map<String, dynamic>> getSettings() async {
+    final r = await http.get(
+      Uri.parse('$_baseUrl/agent/settings'),
+      headers: await _headers(),
+    );
+    if (r.statusCode == 200) {
+      return json.decode(r.body) as Map<String, dynamic>;
+    }
+    throw _err(r, 'Failed to load AI settings');
+  }
+
+  static Future<void> updateSettings({
+    String? apiKey,
+    String? baseUrl,
+    String? model,
+  }) async {
+    final r = await http.put(
+      Uri.parse('$_baseUrl/agent/settings'),
+      headers: await _headers(),
+      body: json.encode({
+        if (apiKey != null) 'api_key': apiKey,
+        if (baseUrl != null) 'base_url': baseUrl,
+        if (model != null) 'model': model,
+      }),
+    );
+    if (r.statusCode != 200) {
+      throw _err(r, 'Failed to save AI settings');
+    }
+  }
+
+  static Future<void> clearSettings() async {
+    final r = await http.delete(
+      Uri.parse('$_baseUrl/agent/settings'),
+      headers: await _headers(),
+    );
+    if (r.statusCode != 200) {
+      throw _err(r, 'Failed to clear AI settings');
+    }
+  }
 }

@@ -117,6 +117,27 @@ class Task {
 
   bool get punctuallyCompleted =>
       isCompleted && completedAt != null && dueDate != null && !completedAt!.isAfter(dueDate!);
+
+  /// The due date of the most "dire" task in this subtree (this task plus all
+  /// descendants), i.e. the incomplete task with the least time remaining
+  /// (earliest due date). Completed tasks and tasks without a due date are
+  /// ignored. Used so a collapsed parent reflects the same urgency that drives
+  /// its position in grouped-mode sorting.
+  DateTime? get mostDireDueDate {
+    DateTime? best;
+    void visit(Task t) {
+      if (!t.isCompleted && t.dueDate != null) {
+        if (best == null || t.dueDate!.isBefore(best!)) {
+          best = t.dueDate;
+        }
+      }
+      for (final s in t.subtasks) {
+        visit(s);
+      }
+    }
+    visit(this);
+    return best;
+  }
 }
 
 class GanttTask {

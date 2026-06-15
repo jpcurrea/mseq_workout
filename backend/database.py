@@ -46,6 +46,13 @@ class User(Base):
     last_login = Column(DateTime, nullable=True)
     # Last project the user had open in the task app (restored on next login)
     active_project_id = Column(Integer, nullable=True)  # FK added after Project is defined
+
+    # Optional per-user LLM provider override (BYO key). The key is stored
+    # encrypted at rest (Fernet); base_url/model let users pick any
+    # OpenAI-compatible provider (OpenAI, Gemini, Claude, local, ...).
+    llm_api_key_encrypted = Column(Text, nullable=True)
+    llm_api_base_url = Column(String, nullable=True)
+    llm_model = Column(String, nullable=True)
     
     # Relationships
     workouts = relationship("Workout", back_populates="user", cascade="all, delete-orphan")
@@ -433,6 +440,9 @@ def init_db():
         "ALTER TABLE plans ADD COLUMN project_id INTEGER",
         "ALTER TABLE llm_conversations ADD COLUMN summary TEXT",
         "ALTER TABLE llm_conversations ADD COLUMN project_id INTEGER",
+        "ALTER TABLE users ADD COLUMN llm_api_key_encrypted TEXT",
+        "ALTER TABLE users ADD COLUMN llm_api_base_url TEXT",
+        "ALTER TABLE users ADD COLUMN llm_model TEXT",
     ]
     with engine.connect() as conn:
         for stmt in _migrations:

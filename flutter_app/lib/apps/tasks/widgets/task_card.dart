@@ -112,7 +112,12 @@ class _TaskCardState extends State<TaskCard> {
                         ),
                       ),
                     ),
-                    _MetricColumns(task: task, timeUnit: widget.timeUnit),
+                    _MetricColumns(
+                      task: task,
+                      timeUnit: widget.timeUnit,
+                      timeLeftDueDate:
+                          task.subtasks.isNotEmpty ? task.mostDireDueDate : null,
+                    ),
                     const Center(
                       child: Padding(
                         padding: EdgeInsets.only(left: 4, right: 6),
@@ -319,10 +324,11 @@ String formatTaskDuration(int minutes, String timeUnit) {
   return '${minutes}m';
 }
 
-/// Compact "time left" value for the preview metric column (no inline label).
-String _timeLeftShort(Task task) {
-  if (task.dueDate == null) return '—';
-  final diff = task.dueDate!.difference(DateTime.now());
+/// "Time left" value from an explicit due date (used when a collapsed parent
+/// should reflect its most-dire subtask instead of its own due date).
+String _timeLeftShortFromDate(DateTime? due) {
+  if (due == null) return '—';
+  final diff = due.difference(DateTime.now());
   if (diff.isNegative) {
     final d = (-diff).inDays;
     return d > 0 ? '${d}d late' : 'Late';
@@ -336,16 +342,28 @@ String _timeLeftShort(Task task) {
 class _MetricColumns extends StatelessWidget {
   final Task task;
   final String timeUnit;
-  const _MetricColumns({required this.task, required this.timeUnit});
+
+  /// When set, the "Time left" column uses this date instead of the task's own
+  /// due date. Lets a collapsed parent show its most-dire subtask's urgency.
+  final DateTime? timeLeftDueDate;
+
+  const _MetricColumns({
+    required this.task,
+    required this.timeUnit,
+    this.timeLeftDueDate,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final hasDue = task.dueDate != null;
+    final effectiveDue = timeLeftDueDate ?? task.dueDate;
+    final fromSubtask =
+        timeLeftDueDate != null && timeLeftDueDate != task.dueDate;
+    final hasDue = effectiveDue != null;
     final hasDuration = task.durationMinutes != null && task.durationMinutes! > 0;
     if (!hasDue && !hasDuration) return const SizedBox.shrink();
 
     final isOverdue =
-        hasDue && DateTime.now().isAfter(task.dueDate!) && !task.isCompleted;
+        hasDue && DateTime.now().isAfter(effectiveDue) && !task.isCompleted;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -354,8 +372,8 @@ class _MetricColumns extends StatelessWidget {
         children: [
           if (hasDue)
             _MetricColumn(
-              header: 'Time left',
-              value: _timeLeftShort(task),
+              header: fromSubtask ? 'Time left ↘' : 'Time left',
+              value: _timeLeftShortFromDate(effectiveDue),
               valueColor: isOverdue ? Colors.red[600] : null,
             ),
           if (hasDue && hasDuration) const SizedBox(width: 12),
