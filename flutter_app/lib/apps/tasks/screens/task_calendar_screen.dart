@@ -65,14 +65,19 @@ class _TaskCalendarScreenState extends State<TaskCalendarScreen> {
         title: const Text('Calendar'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pushReplacementNamed('/hub'),
+          onPressed: () => Navigator.of(context).pop(),
         ),
         actions: [
           IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
           PopupMenuButton<String>(
             icon: const Icon(Icons.menu),
             onSelected: (v) {
-              if (v != 'calendar') _navigateTo('/tasks/$v'.replaceFirst('/tasks/todo', '/tasks'));
+              if (v == 'calendar') return;
+              if (v == 'todo') {
+                Navigator.of(context).pop();
+              } else {
+                _navigateTo('/tasks/$v');
+              }
             },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'todo', child: ListTile(leading: Icon(Icons.check_circle_outline), title: Text('Todo'))),

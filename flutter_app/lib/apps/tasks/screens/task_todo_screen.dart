@@ -176,7 +176,9 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   }
 
   void _navigateTo(String route) {
-    Navigator.of(context).pushReplacementNamed(route);
+    // Other task views are branches off the todo list; push so that
+    // pressing back returns here to the main todo interface.
+    Navigator.of(context).pushNamed(route);
   }
 
   Future<void> _setExpandAll(bool value) async {
@@ -656,7 +658,13 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
         ),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pushReplacementNamed('/hub'),
+          onPressed: () {
+            if (Navigator.of(context).canPop()) {
+              Navigator.of(context).pop();
+            } else {
+              Navigator.of(context).pushReplacementNamed('/hub');
+            }
+          },
         ),
         actions: [
           IconButton(icon: const Icon(Icons.refresh), onPressed: _load),

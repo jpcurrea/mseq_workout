@@ -120,7 +120,7 @@ class _TaskCompletionsScreenState extends State<TaskCompletionsScreen> {
         title: const Text('Completion History'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pushReplacementNamed('/tasks'),
+          onPressed: () => Navigator.of(context).pop(),
         ),
         actions: [
           IconButton(icon: const Icon(Icons.refresh), onPressed: _load),

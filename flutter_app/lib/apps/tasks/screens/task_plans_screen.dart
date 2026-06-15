@@ -111,16 +111,17 @@ class _TaskPlansScreenState extends State<TaskPlansScreen> {
         title: const Text('Plans'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pushReplacementNamed('/hub'),
+          onPressed: () => Navigator.of(context).pop(),
         ),
         actions: [
           IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
           PopupMenuButton<String>(
             icon: const Icon(Icons.menu),
             onSelected: (v) {
+              if (v == 'plans') return;
               if (v == 'todo') {
-                _navigateTo('/tasks');
-              } else if (v != 'plans') {
+                Navigator.of(context).pop();
+              } else {
                 _navigateTo('/tasks/$v');
               }
             },
@@ -203,7 +204,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
   Plan? _plan;
   bool _isLoading = true;
   bool _isSaving = false;
-  bool _isEditMode = true;
+  bool _isEditMode = false;
   late final TextEditingController _contentCtrl;
   final _scrollCtrl = ScrollController();
   bool _hasChanges = false;
@@ -215,7 +216,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
   final _chatScrollCtrl = ScrollController();
   final List<_PendingAttachment> _pendingAttachments = [];
   bool _isSendingChat = false;
-  bool _chatExpanded = true;
+  bool _chatExpanded = false;
   bool _agentRequireApproval = true;
   bool _agentHasMemory = false;
 
