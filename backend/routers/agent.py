@@ -6,6 +6,7 @@ This router is provider-agnostic and can call any OpenAI-compatible endpoint.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import os
@@ -18,6 +19,40 @@ import binascii
 import hashlib
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
+
+
+async def _llm_post(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    max_retries: int = 2,
+) -> httpx.Response:
+    """POST to the LLM endpoint, honouring 429 Retry-After up to max_retries times."""
+    for attempt in range(max_retries + 1):
+        resp = await client.post(url, headers=headers, json=payload)
+        if resp.status_code != 429 or attempt == max_retries:
+            return resp
+        # Parse retry delay from header or response body.
+        retry_after: float = 15.0  # safe default
+        if ra := resp.headers.get("retry-after"):
+            try:
+                retry_after = float(ra)
+            except ValueError:
+                pass
+        else:
+            try:
+                body = resp.json()
+                msg = body.get("error", {}).get("message", "")
+                m = re.search(r"(\d+(?:\.\d+))s", msg)
+                if m:
+                    retry_after = float(m.group(1))
+            except Exception:
+                pass
+        # Cap wait to 60s so we never block a request indefinitely.
+        await asyncio.sleep(min(retry_after + 0.5, 60.0))
+    return resp  # unreachable, but satisfies type checker
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -546,7 +581,7 @@ async def _call_llm(messages: List[Dict[str, str]], model: str) -> str:
 
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
-            resp = await client.post(f"{base_url.rstrip('/')}/chat/completions", headers=headers, json=payload)
+            resp = await _llm_post(client, f"{base_url.rstrip('/')}/chat/completions", headers=headers, payload=payload)
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=504,
@@ -605,7 +640,7 @@ async def _call_llm_message(
 
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
-            resp = await client.post(f"{base_url.rstrip('/')}/chat/completions", headers=headers, json=payload)
+            resp = await _llm_post(client, f"{base_url.rstrip('/')}/chat/completions", headers=headers, payload=payload)
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=504,

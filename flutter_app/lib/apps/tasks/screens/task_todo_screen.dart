@@ -41,6 +41,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   final Set<int> _selectedTagIds = {};
   bool _showCompleted = false;
   final Set<int> _activeSessions = {};
+  final Set<int> _completingTaskIds = {};
   String _timeUnit = 'hours';
   bool _agentRequireApproval = true;
   bool _expandAll = false;
@@ -152,13 +153,22 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
       setState(() {
         final idx = _tasks.indexWhere((t) => t.id == task.id);
         if (idx >= 0) _tasks[idx] = updated;
+        // If hiding completed tasks, queue the animation then remove after it finishes.
         if (updated.isCompleted && !_showCompleted) {
-          _tasks.removeWhere((t) => t.id == task.id);
+          _completingTaskIds.add(updated.id);
         }
       });
     } catch (e) {
       _showError(e.toString());
     }
+  }
+
+  void _onCompletionAnimationDone(int taskId) {
+    if (!mounted) return;
+    setState(() {
+      _completingTaskIds.remove(taskId);
+      _tasks.removeWhere((t) => t.id == taskId);
+    });
   }
 
   Future<void> _skipTask(Task task) async {
@@ -918,20 +928,28 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
           return ListView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             itemCount: sorted.length,
-            itemBuilder: (_, i) => TaskCardTree(
-              task: sorted[i],
-              activeSessions: {for (final id in _activeSessions) id: true},
-              expandAll: _expandAll,
-              renderSubtasks: !_flatView,
-              subtaskSort: subtaskSort,
-              timeUnit: _timeUnit,
-              onComplete: _toggleComplete,
-              onSkip: _skipTask,
-              onEdit: (t) => _openForm(task: t),
-              onDelete: _deleteTask,
-              onStartSession: _startSession,
-              onStopSession: _stopSession,
-            ),
+            itemBuilder: (_, i) {
+              final task = sorted[i];
+              return _TaskCompletionWrapper(
+                key: ValueKey(task.id),
+                completing: _completingTaskIds.contains(task.id),
+                onDismissed: () => _onCompletionAnimationDone(task.id),
+                child: TaskCardTree(
+                  task: task,
+                  activeSessions: {for (final id in _activeSessions) id: true},
+                  expandAll: _expandAll,
+                  renderSubtasks: !_flatView,
+                  subtaskSort: subtaskSort,
+                  timeUnit: _timeUnit,
+                  onComplete: _toggleComplete,
+                  onSkip: _skipTask,
+                  onEdit: (t) => _openForm(task: t),
+                  onDelete: _deleteTask,
+                  onStartSession: _startSession,
+                  onStopSession: _stopSession,
+                ),
+              );
+            },
           );
         },
       ),
@@ -939,8 +957,102 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   }
 }
 
-class _SortBar extends StatelessWidget {
-  final TaskSortMode sortMode;
+// ── Completion exit animation ──────────────────────────────────────────────────
+
+/// Wraps a task list item. When [completing] flips to true it plays a brief
+/// green flash followed by a fade + height-collapse, then calls [onDismissed]
+/// so the parent can remove the task from state.
+class _TaskCompletionWrapper extends StatefulWidget {
+  final bool completing;
+  final VoidCallback? onDismissed;
+  final Widget child;
+
+  const _TaskCompletionWrapper({
+    super.key,
+    required this.completing,
+    required this.child,
+    this.onDismissed,
+  });
+
+  @override
+  State<_TaskCompletionWrapper> createState() => _TaskCompletionWrapperState();
+}
+
+class _TaskCompletionWrapperState extends State<_TaskCompletionWrapper>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 700),
+  );
+
+  // Green overlay: ramps up to 20% opacity in first 20%, gone by 45%.
+  late final Animation<double> _flash = TweenSequence<double>([
+    TweenSequenceItem(tween: Tween(begin: 0.0, end: 0.20), weight: 20),
+    TweenSequenceItem(tween: Tween(begin: 0.20, end: 0.0), weight: 25),
+    TweenSequenceItem(tween: ConstantTween(0.0), weight: 55),
+  ]).animate(_ctrl);
+
+  // Content fades out from t=40% to t=100%.
+  late final Animation<double> _fade = TweenSequence<double>([
+    TweenSequenceItem(tween: ConstantTween(1.0), weight: 40),
+    TweenSequenceItem(tween: Tween(begin: 1.0, end: 0.0), weight: 60),
+  ]).animate(_ctrl);
+
+  // Height collapses from t=50% to t=100%.
+  late final Animation<double> _size = TweenSequence<double>([
+    TweenSequenceItem(tween: ConstantTween(1.0), weight: 50),
+    TweenSequenceItem(
+      tween: Tween(begin: 1.0, end: 0.0).chain(CurveTween(curve: Curves.easeInOut)),
+      weight: 50,
+    ),
+  ]).animate(_ctrl);
+
+  @override
+  void didUpdateWidget(_TaskCompletionWrapper old) {
+    super.didUpdateWidget(old);
+    if (widget.completing && !old.completing) {
+      _ctrl.forward().whenComplete(() => widget.onDismissed?.call());
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      child: widget.child,
+      builder: (context, child) => SizeTransition(
+        sizeFactor: _size,
+        axisAlignment: -1.0,
+        child: Opacity(
+          opacity: _fade.value,
+          child: Stack(
+            children: [
+              child!,
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.green.withValues(alpha: _flash.value),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SortBar extends StatelessWidget {  final TaskSortMode sortMode;
   final String Function(TaskSortMode) labelFor;
   final void Function(TaskSortMode) onSortSelected;
 
