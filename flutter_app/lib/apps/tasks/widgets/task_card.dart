@@ -216,6 +216,20 @@ class _TaskCardState extends State<TaskCard> {
                         ],
                       ),
 
+                      // Description (full card only)
+                      if (task.description != null && task.description!.trim().isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6, left: 30),
+                          child: Text(
+                            task.description!.trim(),
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: task.isCompleted
+                                      ? Colors.grey
+                                      : Colors.grey[700],
+                                ),
+                          ),
+                        ),
+
                       // Due date + tags row
                       if (task.dueDate != null || task.durationMinutes != null || task.tags.isNotEmpty)
                         Padding(

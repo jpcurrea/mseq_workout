@@ -912,16 +912,28 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
                         tooltip: 'Attach files (PDF, text, images)',
                       ),
                       Expanded(
-                        child: TextField(
-                          controller: _chatCtrl,
-                          minLines: 1,
-                          maxLines: 4,
-                          decoration: const InputDecoration(
-                            hintText: 'Example: Break this plan into 6 tasks and insert task widgets.',
-                            border: OutlineInputBorder(),
-                            isDense: true,
+                        child: Focus(
+                          onKeyEvent: (node, event) {
+                            if (event is KeyDownEvent &&
+                                event.logicalKey == LogicalKeyboardKey.enter &&
+                                !HardwareKeyboard.instance.isShiftPressed) {
+                              if (!_isSendingChat) _sendAgentMessage();
+                              return KeyEventResult.handled;
+                            }
+                            return KeyEventResult.ignored;
+                          },
+                          child: TextField(
+                            controller: _chatCtrl,
+                            minLines: 1,
+                            maxLines: 4,
+                            keyboardType: TextInputType.multiline,
+                            textInputAction: TextInputAction.newline,
+                            decoration: const InputDecoration(
+                              hintText: 'Example: Break this plan into 6 tasks and insert task widgets.',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
                           ),
-                          onSubmitted: (_) => _sendAgentMessage(),
                         ),
                       ),
                       const SizedBox(width: 8),
