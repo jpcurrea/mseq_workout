@@ -13,3 +13,4 @@ backend/oauth_clientID.txt
 /*.pdf
 career_plan_*.csv
 backend/main_old.py
+backend/.env.example

@@ -21,3 +21,6 @@ passlib[bcrypt]>=1.7.4
 
 # Rate limiting
 slowapi>=0.1.9
+
+# Agent file attachments (PDF text extraction + page rasterization for vision)
+pymupdf>=1.24.0

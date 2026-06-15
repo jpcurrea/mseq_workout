@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import '../models/task.dart';
 import '../models/project.dart';
 import '../services/task_api_service.dart';
@@ -207,9 +210,11 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
   TaskViewMode _previewViewMode = TaskViewMode.topLevelPreview;
   late final TextEditingController _chatCtrl;
   final List<_AgentChatEntry> _chatEntries = [];
+  final List<_PendingAttachment> _pendingAttachments = [];
   bool _isSendingChat = false;
   bool _chatExpanded = true;
   bool _agentRequireApproval = true;
+  bool _agentHasMemory = false;
 
   @override
   void initState() {
@@ -246,9 +251,35 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
         _contentCtrl.text = plan.content;
         _isLoading = false;
       });
+      await _restoreConversation();
     } catch (e) {
       setState(() => _isLoading = false);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+    }
+  }
+
+  Future<void> _restoreConversation() async {
+    if (_plan == null) return;
+    try {
+      final convo = await AgentApiService.getConversation(
+        mode: 'planning',
+        projectId: _plan!.projectId,
+        planId: _plan!.id,
+      );
+      final messages = (convo['messages'] as List?) ?? const [];
+      if (messages.isEmpty) return;
+      if (!mounted) return;
+      setState(() {
+        _chatEntries
+          ..clear()
+          ..addAll(messages.map((m) => _AgentChatEntry(
+                role: (m['role'] ?? 'assistant').toString(),
+                content: (m['content'] ?? '').toString(),
+              )));
+        _agentHasMemory = convo['has_memory'] == true;
+      });
+    } catch (_) {
+      // Non-fatal: a missing/failed restore just starts an empty chat.
     }
   }
 
@@ -290,7 +321,12 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
         ? '${text.substring(0, pos)}$token${text.substring(pos)}'
         : '$text$token';
     _contentCtrl.text = newText;
-    setState(() => _hasChanges = true);
+    setState(() {
+      // Make the inserted task renderable in the live preview immediately,
+      // before the next save/reload repopulates the plan's task map.
+      _plan?.tasks[selected.id.toString()] = selected;
+      _hasChanges = true;
+    });
   }
 
   IconData _previewModeIcon() {
@@ -339,17 +375,111 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     }
   }
 
+  Future<void> _pickAttachments() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        withData: true,
+        type: FileType.custom,
+        allowedExtensions: const [
+          'pdf', 'txt', 'md', 'markdown', 'csv', 'json', 'log', 'yaml', 'yml', 'tsv',
+          'png', 'jpg', 'jpeg', 'webp', 'gif',
+        ],
+      );
+      if (result == null) return;
+      const maxBytes = 10 * 1024 * 1024;
+      final added = <_PendingAttachment>[];
+      final skipped = <String>[];
+      for (final f in result.files) {
+        final bytes = f.bytes;
+        if (bytes == null) {
+          skipped.add('${f.name} (unreadable)');
+          continue;
+        }
+        if (bytes.length > maxBytes) {
+          skipped.add('${f.name} (>10 MB)');
+          continue;
+        }
+        added.add(_PendingAttachment(
+          filename: f.name,
+          bytes: bytes,
+          mimeType: _mimeForExtension(f.extension),
+        ));
+      }
+      if (added.isNotEmpty) {
+        setState(() {
+          final room = 5 - _pendingAttachments.length;
+          _pendingAttachments.addAll(added.take(room < 0 ? 0 : room));
+        });
+      }
+      if (mounted && skipped.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Skipped: ${skipped.join(', ')}')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not pick files: $e')));
+      }
+    }
+  }
+
+  String? _mimeForExtension(String? ext) {
+    switch ((ext ?? '').toLowerCase()) {
+      case 'pdf':
+        return 'application/pdf';
+      case 'png':
+        return 'image/png';
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'webp':
+        return 'image/webp';
+      case 'gif':
+        return 'image/gif';
+      case 'txt':
+      case 'log':
+        return 'text/plain';
+      case 'md':
+      case 'markdown':
+        return 'text/markdown';
+      case 'csv':
+        return 'text/csv';
+      case 'json':
+        return 'application/json';
+      default:
+        return null;
+    }
+  }
+
   Future<void> _sendAgentMessage() async {
     final text = _chatCtrl.text.trim();
-    if (text.isEmpty || _plan == null || _isSendingChat) return;
+    if ((text.isEmpty && _pendingAttachments.isEmpty) || _plan == null || _isSendingChat) {
+      return;
+    }
 
     if (_isEditMode && _hasChanges) {
       await _save();
     }
 
+    final attachments = _pendingAttachments
+        .map((a) => {
+              'filename': a.filename,
+              if (a.mimeType != null) 'mime_type': a.mimeType,
+              'data_base64': base64Encode(a.bytes),
+            })
+        .toList();
+    final attachmentNames = _pendingAttachments.map((a) => a.filename).toList();
+    final displayText = attachmentNames.isEmpty
+        ? text
+        : (text.isEmpty
+            ? '📎 ${attachmentNames.join(', ')}'
+            : '$text\n📎 ${attachmentNames.join(', ')}');
+
     setState(() {
-      _chatEntries.add(_AgentChatEntry(role: 'user', content: text));
+      _chatEntries.add(_AgentChatEntry(role: 'user', content: displayText));
       _chatCtrl.clear();
+      _pendingAttachments.clear();
       _isSendingChat = true;
     });
 
@@ -364,11 +494,18 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
         planId: _plan!.id,
         messages: payloadMessages,
         requireApproval: _agentRequireApproval,
+        attachments: attachments,
       );
 
       setState(() {
         _chatEntries.add(_AgentChatEntry(role: 'assistant', content: res.reply));
       });
+
+      if (res.attachmentNotes.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(res.attachmentNotes.join('\n'))),
+        );
+      }
 
       if (res.pendingApproval && res.proposedToolCalls.isNotEmpty) {
         final approved = await _confirmApplyToolCalls(res.proposedToolCalls);
@@ -621,6 +758,14 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
                       ),
                       child: const Text('Approval On', style: TextStyle(fontSize: 11)),
                     ),
+                  if (_agentHasMemory) ...[
+                    const SizedBox(width: 6),
+                    Tooltip(
+                      message: 'Earlier turns are summarized into memory',
+                      child: Icon(Icons.psychology_outlined,
+                          size: 16, color: theme.colorScheme.primary),
+                    ),
+                  ],
                   if (_isSendingChat)
                     const SizedBox(
                       width: 16,
@@ -669,26 +814,60 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-              child: Row(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _chatCtrl,
-                      minLines: 1,
-                      maxLines: 4,
-                      decoration: const InputDecoration(
-                        hintText: 'Example: Break this plan into 6 tasks and insert task widgets.',
-                        border: OutlineInputBorder(),
-                        isDense: true,
+                  if (_pendingAttachments.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          for (int i = 0; i < _pendingAttachments.length; i++)
+                            Chip(
+                              avatar: const Icon(Icons.attach_file, size: 16),
+                              label: Text(
+                                _pendingAttachments[i].filename,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              onDeleted: _isSendingChat
+                                  ? null
+                                  : () => setState(() => _pendingAttachments.removeAt(i)),
+                            ),
+                        ],
                       ),
-                      onSubmitted: (_) => _sendAgentMessage(),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    onPressed: _isSendingChat ? null : _sendAgentMessage,
-                    icon: const Icon(Icons.send),
-                    tooltip: 'Send to planning agent',
+                  Row(
+                    children: [
+                      IconButton(
+                        onPressed: (_isSendingChat || _pendingAttachments.length >= 5)
+                            ? null
+                            : _pickAttachments,
+                        icon: const Icon(Icons.attach_file),
+                        tooltip: 'Attach files (PDF, text, images)',
+                      ),
+                      Expanded(
+                        child: TextField(
+                          controller: _chatCtrl,
+                          minLines: 1,
+                          maxLines: 4,
+                          decoration: const InputDecoration(
+                            hintText: 'Example: Break this plan into 6 tasks and insert task widgets.',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          onSubmitted: (_) => _sendAgentMessage(),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        onPressed: _isSendingChat ? null : _sendAgentMessage,
+                        icon: const Icon(Icons.send),
+                        tooltip: 'Send to planning agent',
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -904,4 +1083,16 @@ class _AgentChatEntry {
   final String content;
 
   const _AgentChatEntry({required this.role, required this.content});
+}
+
+class _PendingAttachment {
+  final String filename;
+  final Uint8List bytes;
+  final String? mimeType;
+
+  const _PendingAttachment({
+    required this.filename,
+    required this.bytes,
+    this.mimeType,
+  });
 }

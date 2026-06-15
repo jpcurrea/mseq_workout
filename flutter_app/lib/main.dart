@@ -9,6 +9,7 @@ import 'apps/tasks/screens/task_todo_screen.dart';
 import 'apps/tasks/screens/task_calendar_screen.dart';
 import 'apps/tasks/screens/task_gantt_screen.dart';
 import 'apps/tasks/screens/task_plans_screen.dart';
+import 'apps/tasks/screens/task_completions_screen.dart';
 import 'apps/budget/screens/budget_home_screen.dart';
 import 'shared/services/auth_service.dart';
 
@@ -45,6 +46,7 @@ class WorkoutApp extends StatelessWidget {
         '/tasks/calendar': (context) => const TaskCalendarScreen(),
         '/tasks/gantt': (context) => const TaskGanttScreen(),
         '/tasks/plans': (context) => const TaskPlansScreen(),
+        '/tasks/completions': (context) => const TaskCompletionsScreen(),
         // Budget sub-app
         '/budget': (context) => const BudgetHomeScreen(),
       },

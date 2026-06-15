@@ -9,12 +9,14 @@ import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, selectinload
 
 from database import (
     get_session,
     Task,
+    TaskCompletion,
     Tag,
     WorkSession,
     Plan,
@@ -548,6 +550,96 @@ async def analytics_history(
     return rows
 
 
+# ── Completion history (view + CSV export) ────────────────────────────────────
+
+def _completion_lateness_minutes(c: TaskCompletion) -> Optional[float]:
+    if c.due_date and c.completed_at:
+        return (c.completed_at - c.due_date).total_seconds() / 60.0
+    return None
+
+
+@tasks_router.get("/completions")
+async def list_completions(
+    project_id: int,
+    limit: int = 500,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Chronological record of every task completion in the project."""
+    _assert_project_member(project_id, user_id, session)
+    rows = (
+        session.query(TaskCompletion)
+        .filter(TaskCompletion.project_id == project_id)
+        .order_by(TaskCompletion.completed_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": c.id,
+            "task_id": c.task_id,
+            "title": c.title,
+            "tags": c.tags,
+            "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+            "due_date": c.due_date.isoformat() if c.due_date else None,
+            "estimated_minutes": c.duration_minutes,
+            "actual_minutes": c.actual_minutes,
+            "lateness_minutes": _completion_lateness_minutes(c),
+        }
+        for c in rows
+    ]
+
+
+@tasks_router.get("/completions/export")
+async def export_completions(
+    project_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Download the project's completion record as a CSV file."""
+    _assert_project_member(project_id, user_id, session)
+    rows = (
+        session.query(TaskCompletion)
+        .filter(TaskCompletion.project_id == project_id)
+        .order_by(TaskCompletion.completed_at.asc())
+        .all()
+    )
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow([
+        "completion_id",
+        "task_id",
+        "title",
+        "tags",
+        "completed_at",
+        "due_date",
+        "estimated_minutes",
+        "actual_minutes",
+        "lateness_minutes",
+    ])
+    for c in rows:
+        writer.writerow([
+            c.id,
+            c.task_id if c.task_id is not None else "",
+            c.title or "",
+            c.tags or "",
+            c.completed_at.isoformat() if c.completed_at else "",
+            c.due_date.isoformat() if c.due_date else "",
+            c.duration_minutes if c.duration_minutes is not None else "",
+            round(c.actual_minutes, 2) if c.actual_minutes is not None else "",
+            round(_completion_lateness_minutes(c), 2)
+            if _completion_lateness_minutes(c) is not None else "",
+        ])
+
+    filename = f"task_completions_project_{project_id}.csv"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ── Tag endpoints (MUST be before /{id}) ──────────────────────────────────────
 
 @tasks_router.get("/tags")
@@ -871,6 +963,20 @@ async def toggle_complete(
 
         task.is_completed = True
         task.completed_at = now
+
+        # Record an immutable completion-history row (survives edits/deletes and
+        # captures every recurrence occurrence).
+        session.add(TaskCompletion(
+            task_id=task.id,
+            user_id=user_id,
+            project_id=task.project_id,
+            title=task.title,
+            completed_at=now,
+            due_date=task.due_date,
+            duration_minutes=task.duration_minutes,
+            actual_minutes=_actual_duration_minutes(task),
+            tags=", ".join(t.name for t in task.tags) if task.tags else None,
+        ))
 
         # If recurring, create next occurrence
         if task.is_recurring and task.recurrence_rule and task.due_date:

@@ -72,93 +72,58 @@ class _TaskCardState extends State<TaskCard> {
       child: Card(
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: () => setState(() => _isCardExpanded = true),
-          borderRadius: BorderRadius.circular(8),
-          child: IntrinsicHeight(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Container(
-                  width: 4,
-                  decoration: BoxDecoration(
-                    color: task.isCompleted ? Colors.grey[300] : _urgencyColor,
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(8),
-                      bottomLeft: Radius.circular(8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Container(
+                      width: 4,
+                      color: task.isCompleted ? Colors.grey[300] : _urgencyColor,
                     ),
-                  ),
-                ),
-                GestureDetector(
-                  onTap: widget.onComplete,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    child: Icon(
-                      task.isCompleted ? Icons.check_circle : Icons.radio_button_unchecked,
-                      color: task.isCompleted ? Colors.green : Colors.grey,
-                      size: 20,
-                    ),
-                  ),
-                ),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 7),
-                    child: Text(
-                      task.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                        decoration: task.isCompleted ? TextDecoration.lineThrough : null,
-                        color: task.isCompleted ? Colors.grey : null,
+                    GestureDetector(
+                      onTap: widget.onComplete,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                        child: Icon(
+                          task.isCompleted ? Icons.check_circle : Icons.radio_button_unchecked,
+                          color: task.isCompleted ? Colors.green : Colors.grey,
+                          size: 20,
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                if (task.dueDate != null)
-                  Center(
-                    child: Padding(
-                      padding: const EdgeInsets.only(right: 4),
-                      child: Chip(
-                        label: Text(task.dueDateLabel,
-                            style: TextStyle(fontSize: 10, color: Colors.grey[700])),
-                        padding: EdgeInsets.zero,
-                        visualDensity: VisualDensity.compact,
-                        backgroundColor: Colors.grey[100],
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 7),
+                        child: Text(
+                          task.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            decoration: task.isCompleted ? TextDecoration.lineThrough : null,
+                            color: task.isCompleted ? Colors.grey : null,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                if (task.durationMinutes != null && task.durationMinutes! > 0)
-                  Center(
-                    child: Padding(
-                      padding: const EdgeInsets.only(right: 4),
-                      child: _DurationChip(
-                        minutes: task.durationMinutes!,
-                        timeUnit: widget.timeUnit,
-                        compact: true,
+                    _MetricColumns(task: task, timeUnit: widget.timeUnit),
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.only(left: 4, right: 6),
+                        child: Icon(Icons.expand_more, size: 16, color: Colors.grey),
                       ),
                     ),
-                  ),
-                ...task.tags.take(2).map((tag) => Center(
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 4),
-                    child: Chip(
-                      label: Text(tag.name,
-                          style: const TextStyle(fontSize: 10, color: Colors.white)),
-                      backgroundColor: tag.flutterColor,
-                      padding: EdgeInsets.zero,
-                      visualDensity: VisualDensity.compact,
-                    ),
-                  ),
-                )),
-                const Center(
-                  child: Padding(
-                    padding: EdgeInsets.only(right: 6),
-                    child: Icon(Icons.expand_more, size: 16, color: Colors.grey),
-                  ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+              _BottomProgressLine(task: task),
+            ],
           ),
         ),
       ),
@@ -175,22 +140,20 @@ class _TaskCardState extends State<TaskCard> {
       child: Card(
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Urgency color bar
-              Container(
-                width: 5,
-                decoration: BoxDecoration(
-                  color: task.isCompleted ? Colors.grey[300] : _urgencyColor,
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(10),
-                    bottomLeft: Radius.circular(10),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Urgency color bar
+                  Container(
+                    width: 5,
+                    color: task.isCompleted ? Colors.grey[300] : _urgencyColor,
                   ),
-                ),
-              ),
-              Expanded(
+                  Expanded(
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   child: Column(
@@ -334,6 +297,9 @@ class _TaskCardState extends State<TaskCard> {
             ],
           ),
         ),
+        _BottomProgressLine(task: task),
+          ],
+        ),
       ),
     );
   }
@@ -353,22 +319,129 @@ String formatTaskDuration(int minutes, String timeUnit) {
   return '${minutes}m';
 }
 
+/// Compact "time left" value for the preview metric column (no inline label).
+String _timeLeftShort(Task task) {
+  if (task.dueDate == null) return '—';
+  final diff = task.dueDate!.difference(DateTime.now());
+  if (diff.isNegative) {
+    final d = (-diff).inDays;
+    return d > 0 ? '${d}d late' : 'Late';
+  }
+  if (diff.inDays == 0) return 'Today';
+  return '${diff.inDays}d';
+}
+
+/// Two compact columns ("Time left" / "Duration") with small headers, shown on
+/// the right edge of the preview card in place of the old chips.
+class _MetricColumns extends StatelessWidget {
+  final Task task;
+  final String timeUnit;
+  const _MetricColumns({required this.task, required this.timeUnit});
+
+  @override
+  Widget build(BuildContext context) {
+    final hasDue = task.dueDate != null;
+    final hasDuration = task.durationMinutes != null && task.durationMinutes! > 0;
+    if (!hasDue && !hasDuration) return const SizedBox.shrink();
+
+    final isOverdue =
+        hasDue && DateTime.now().isAfter(task.dueDate!) && !task.isCompleted;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (hasDue)
+            _MetricColumn(
+              header: 'Time left',
+              value: _timeLeftShort(task),
+              valueColor: isOverdue ? Colors.red[600] : null,
+            ),
+          if (hasDue && hasDuration) const SizedBox(width: 12),
+          if (hasDuration)
+            _MetricColumn(
+              header: 'Duration',
+              value: formatTaskDuration(task.durationMinutes!, timeUnit),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricColumn extends StatelessWidget {
+  final String header;
+  final String value;
+  final Color? valueColor;
+  const _MetricColumn({required this.header, required this.value, this.valueColor});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Text(
+          header,
+          style: TextStyle(
+            fontSize: 8,
+            color: Colors.grey[500],
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.2,
+          ),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: valueColor ?? Colors.grey[800],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A thin progress line that hugs the bottom edge of the card. Stays visible
+/// when the card is collapsed, as long as the task has an estimated duration.
+class _BottomProgressLine extends StatelessWidget {
+  final Task task;
+  const _BottomProgressLine({required this.task});
+
+  @override
+  Widget build(BuildContext context) {
+    if (task.durationMinutes == null || task.durationMinutes! <= 0) {
+      return const SizedBox.shrink();
+    }
+    final progress = task.progressFraction;
+    return LinearProgressIndicator(
+      value: progress,
+      minHeight: 3,
+      backgroundColor: Colors.grey[200],
+      color: task.isCompleted
+          ? Colors.green
+          : (progress >= 1.0 ? Colors.orange : Colors.blueGrey),
+    );
+  }
+}
+
 class _DurationChip extends StatelessWidget {
   final int minutes;
   final String timeUnit;
-  final bool compact;
-  const _DurationChip({required this.minutes, required this.timeUnit, this.compact = false});
+  const _DurationChip({required this.minutes, required this.timeUnit});
 
   @override
   Widget build(BuildContext context) {
     return Chip(
-      avatar: Icon(Icons.timer_outlined, size: compact ? 12 : 14, color: Colors.grey[600]),
+      avatar: Icon(Icons.timer_outlined, size: 14, color: Colors.grey[600]),
       label: Text(
         formatTaskDuration(minutes, timeUnit),
-        style: TextStyle(fontSize: compact ? 10 : 11, color: Colors.grey[800]),
+        style: TextStyle(fontSize: 11, color: Colors.grey[800]),
       ),
       backgroundColor: Colors.grey[100],
-      padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 2),
+      padding: const EdgeInsets.symmetric(horizontal: 2),
       visualDensity: VisualDensity.compact,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );

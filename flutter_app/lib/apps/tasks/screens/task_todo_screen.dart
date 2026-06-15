@@ -680,6 +680,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
                 case 'calendar': _navigateTo('/tasks/calendar'); break;
                 case 'gantt':    _navigateTo('/tasks/gantt'); break;
                 case 'plans':    _navigateTo('/tasks/plans'); break;
+                case 'history':  _navigateTo('/tasks/completions'); break;
                 case 'settings': _showSettings(); break;
                 case 'share':    _showInvite(); break;
                 case 'join':     _showJoinProject(); break;
@@ -691,6 +692,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
               const PopupMenuItem(value: 'calendar', child: ListTile(leading: Icon(Icons.calendar_month), title: Text('Calendar'))),
               const PopupMenuItem(value: 'gantt', child: ListTile(leading: Icon(Icons.view_timeline), title: Text('Gantt'))),
               const PopupMenuItem(value: 'plans', child: ListTile(leading: Icon(Icons.description_outlined), title: Text('Plans'))),
+              const PopupMenuItem(value: 'history', child: ListTile(leading: Icon(Icons.history), title: Text('Completion history'))),
               const PopupMenuDivider(),
               if (_activeProject?.canWrite == true)
                 const PopupMenuItem(value: 'share', child: ListTile(leading: Icon(Icons.share_outlined), title: Text('Share project'))),

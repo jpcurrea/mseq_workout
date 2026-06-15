@@ -288,4 +288,23 @@ class TaskApiService {
     if (r.statusCode == 200) return json.decode(r.body) as Map<String, dynamic>;
     throw _err(r, 'Failed to load punctuality analytics');
   }
+
+  // ── Completion history ───────────────────────────────────────────────────────
+
+  static Future<List<Map<String, dynamic>>> getCompletions({required int projectId}) async {
+    final uri = Uri.parse('$_baseUrl/tasks/completions')
+        .replace(queryParameters: {'project_id': projectId.toString()});
+    final r = await http.get(uri, headers: await _headers());
+    if (r.statusCode == 200) return List<Map<String, dynamic>>.from(json.decode(r.body));
+    throw _err(r, 'Failed to load completion history');
+  }
+
+  /// Returns the raw CSV text of the project's completion record.
+  static Future<String> exportCompletionsCsv({required int projectId}) async {
+    final uri = Uri.parse('$_baseUrl/tasks/completions/export')
+        .replace(queryParameters: {'project_id': projectId.toString()});
+    final r = await http.get(uri, headers: await _authHeaders());
+    if (r.statusCode == 200) return r.body;
+    throw _err(r, 'Failed to export completion history');
+  }
 }

@@ -280,8 +280,10 @@ class LLMConversation(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     mode = Column(String, nullable=False)           # "planning" | "analytics"
-    messages = Column(Text, nullable=False, default="[]")  # JSON array string
+    messages = Column(Text, nullable=False, default="[]")  # JSON array of recent raw turns
+    summary = Column(Text, nullable=True)           # compressed memory of older turns
     related_plan_id = Column(Integer, ForeignKey("plans.id"), nullable=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(
         DateTime,
@@ -291,6 +293,50 @@ class LLMConversation(Base):
 
     user = relationship("User", back_populates="llm_conversations")
     plan = relationship("Plan", back_populates="llm_conversations")
+
+
+class TaskCompletion(Base):
+    """An immutable record of one task-completion event.
+
+    Stored independently of the task (with snapshot fields) so the history
+    survives task edits/deletions and captures every recurrence completion.
+    """
+    __tablename__ = "task_completions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    title = Column(String, nullable=True)             # snapshot at completion
+    completed_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow, index=True)
+    due_date = Column(DateTime, nullable=True)         # snapshot
+    duration_minutes = Column(Integer, nullable=True)  # estimated, snapshot
+    actual_minutes = Column(Float, nullable=True)      # measured from work sessions
+    tags = Column(String, nullable=True)               # comma-joined snapshot
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    def __repr__(self):
+        return f"<TaskCompletion(id={self.id}, task_id={self.task_id}, at={self.completed_at})>"
+
+
+class LLMUsage(Base):
+    """Per-request token usage and estimated cost for the LLM agent.
+
+    Summed to enforce a hard spending cap (LLM_SPEND_CAP_USD).
+    """
+    __tablename__ = "llm_usage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    model = Column(String, nullable=True)
+    prompt_tokens = Column(Integer, nullable=False, default=0)
+    completion_tokens = Column(Integer, nullable=False, default=0)
+    cost_usd = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+
+    def __repr__(self):
+        return f"<LLMUsage(id={self.id}, model={self.model}, cost=${self.cost_usd:.4f})>"
+
 
 
 # ── Budget models ──────────────────────────────────────────────────────────────
@@ -385,6 +431,8 @@ def init_db():
         # in main.py startup_event assigns them to the user's Personal project.
         "ALTER TABLE tasks ADD COLUMN project_id INTEGER",
         "ALTER TABLE plans ADD COLUMN project_id INTEGER",
+        "ALTER TABLE llm_conversations ADD COLUMN summary TEXT",
+        "ALTER TABLE llm_conversations ADD COLUMN project_id INTEGER",
     ]
     with engine.connect() as conn:
         for stmt in _migrations:
