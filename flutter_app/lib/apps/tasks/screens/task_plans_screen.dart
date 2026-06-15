@@ -104,6 +104,36 @@ class _TaskPlansScreenState extends State<TaskPlansScreen> {
     }
   }
 
+  Future<void> _renamePlan(PlanSummary plan) async {
+    final titleCtrl = TextEditingController(text: plan.title);
+    final newTitle = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Rename Plan'),
+        content: TextField(
+          controller: titleCtrl,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Title'),
+          onSubmitted: (v) => Navigator.pop(context, v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, titleCtrl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newTitle == null || newTitle.isEmpty || newTitle == plan.title) return;
+    try {
+      await TaskApiService.updatePlan(plan.id, title: newTitle);
+      _load();
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -163,9 +193,16 @@ class _TaskPlansScreenState extends State<TaskPlansScreen> {
                               'Updated ${DateFormat('MMM d, y').format(plan.updatedAt)}',
                               style: const TextStyle(fontSize: 12),
                             ),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.delete_outline, color: Colors.red),
-                              onPressed: () => _deletePlan(plan),
+                            trailing: PopupMenuButton<String>(
+                              icon: const Icon(Icons.more_vert),
+                              onSelected: (v) {
+                                if (v == 'rename') _renamePlan(plan);
+                                if (v == 'delete') _deletePlan(plan);
+                              },
+                              itemBuilder: (_) => const [
+                                PopupMenuItem(value: 'rename', child: ListTile(leading: Icon(Icons.edit_outlined), title: Text('Rename'))),
+                                PopupMenuItem(value: 'delete', child: ListTile(leading: Icon(Icons.delete_outline, color: Colors.red), title: Text('Delete'))),
+                              ],
                             ),
                             onTap: () async {
                               await Navigator.of(context).push(

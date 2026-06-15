@@ -410,6 +410,10 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
         projects: _projects,
         activeProjectId: _activeProject?.id,
         onSwitch: (p) => Navigator.pop(context, p),
+        onRename: (p) {
+          Navigator.pop(context);
+          _showRenameProject(p);
+        },
         onCreateNew: () => Navigator.pop(context, null),
         onJoin: () => Navigator.pop(context, _activeProject), // sentinel
       ),
@@ -419,6 +423,40 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
       await _showCreateProject();
     } else if (selected.id != _activeProject?.id) {
       await _switchProject(selected);
+    }
+  }
+
+  Future<void> _showRenameProject(Project project) async {
+    final nameCtrl = TextEditingController(text: project.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Rename Project'),
+        content: TextField(
+          controller: nameCtrl,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+          onSubmitted: (v) => Navigator.pop(context, v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, nameCtrl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty || newName == project.name) return;
+    try {
+      final updated = await ProjectApiService.updateProject(project.id, name: newName);
+      final projects = await ProjectApiService.getProjects();
+      setState(() {
+        _projects = projects;
+        if (_activeProject?.id == updated.id) _activeProject = updated;
+      });
+    } catch (e) {
+      _showError(e.toString());
     }
   }
 
@@ -1133,6 +1171,7 @@ class _ProjectSwitcherSheet extends StatelessWidget {
   final List<Project> projects;
   final int? activeProjectId;
   final void Function(Project) onSwitch;
+  final void Function(Project) onRename;
   final VoidCallback onCreateNew;
   final VoidCallback onJoin;
 
@@ -1140,6 +1179,7 @@ class _ProjectSwitcherSheet extends StatelessWidget {
     required this.projects,
     required this.activeProjectId,
     required this.onSwitch,
+    required this.onRename,
     required this.onCreateNew,
     required this.onJoin,
   });
@@ -1163,9 +1203,19 @@ class _ProjectSwitcherSheet extends StatelessWidget {
               fontWeight: p.id == activeProjectId ? FontWeight.bold : FontWeight.normal,
             )),
             subtitle: Text('${p.memberCount} member${p.memberCount != 1 ? 's' : ''} · ${p.role}'),
-            trailing: p.id == activeProjectId
-                ? Icon(Icons.check, color: Theme.of(context).colorScheme.primary)
-                : null,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (p.canWrite)
+                  IconButton(
+                    icon: const Icon(Icons.edit_outlined, size: 20),
+                    tooltip: 'Rename project',
+                    onPressed: () => onRename(p),
+                  ),
+                if (p.id == activeProjectId)
+                  Icon(Icons.check, color: Theme.of(context).colorScheme.primary),
+              ],
+            ),
             onTap: () => onSwitch(p),
           )),
           const Divider(),
