@@ -143,6 +143,12 @@ def _next_due_date(due_date: datetime.datetime, rule: str) -> datetime.datetime:
     rule = rule.upper()
     if rule == "DAILY":
         return due_date + datetime.timedelta(days=1)
+    if rule == "WEEKDAYS":
+        # Advance by at least 1 day, then skip over Saturday (5) and Sunday (6)
+        next_dt = due_date + datetime.timedelta(days=1)
+        while next_dt.weekday() >= 5:
+            next_dt += datetime.timedelta(days=1)
+        return next_dt
     if rule == "WEEKLY":
         return due_date + datetime.timedelta(weeks=1)
     if rule == "MONTHLY":

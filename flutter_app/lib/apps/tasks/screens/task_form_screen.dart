@@ -301,6 +301,7 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
                 ),
                 items: const [
                   DropdownMenuItem(value: 'DAILY', child: Text('Daily')),
+                  DropdownMenuItem(value: 'WEEKDAYS', child: Text('Every weekday (Mon–Fri)')),
                   DropdownMenuItem(value: 'WEEKLY', child: Text('Weekly')),
                   DropdownMenuItem(value: 'MONTHLY', child: Text('Monthly')),
                 ],
