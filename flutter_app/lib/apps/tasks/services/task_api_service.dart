@@ -165,6 +165,82 @@ class TaskApiService {
     if (r.statusCode != 200) throw _err(r, 'Failed to delete task');
   }
 
+  /// Delete multiple tasks at once. Returns the count of deleted tasks.
+  static Future<int> batchDeleteTasks({
+    required int projectId,
+    required List<int> taskIds,
+  }) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/tasks/batch-delete'),
+      headers: await _headers(),
+      body: json.encode({'project_id': projectId, 'task_ids': taskIds}),
+    );
+    if (r.statusCode == 200) {
+      return (json.decode(r.body) as Map)['deleted'] as int;
+    }
+    throw _err(r, 'Failed to batch-delete tasks');
+  }
+
+  /// Batch-edit tags (and optionally scalar fields) on multiple tasks.
+  /// [tagMode] is "overwrite" (replace existing tags) or "add" (append).
+  /// [tagNames] are new or existing tag names resolved server-side.
+  static Future<int> batchUpdateTasks({
+    required int projectId,
+    required List<int> taskIds,
+    List<int>? tagIds,
+    List<String>? tagNames,
+    String tagMode = 'overwrite',
+    String? dueDate,
+    int? durationMinutes,
+    bool? isRecurring,
+    String? recurrenceRule,
+  }) async {
+    final body = <String, dynamic>{
+      'project_id': projectId,
+      'task_ids': taskIds,
+      'tag_mode': tagMode,
+      if (tagIds != null) 'tag_ids': tagIds,
+      if (tagNames != null && tagNames.isNotEmpty) 'tag_names': tagNames,
+      if (dueDate != null) 'due_date': dueDate,
+      if (durationMinutes != null) 'duration_minutes': durationMinutes,
+      if (isRecurring != null) 'is_recurring': isRecurring,
+      if (recurrenceRule != null) 'recurrence_rule': recurrenceRule,
+    };
+    final r = await http.post(
+      Uri.parse('$_baseUrl/tasks/batch-update'),
+      headers: await _headers(),
+      body: json.encode(body),
+    );
+    if (r.statusCode == 200) {
+      return (json.decode(r.body) as Map)['updated'] as int;
+    }
+    throw _err(r, 'Failed to batch-update tasks');
+  }
+
+  /// Mark multiple tasks as completed or skipped.
+  /// Recurring tasks are advanced to their next occurrence.
+  static Future<int> batchCompleteTasks({
+    required int projectId,
+    required List<int> taskIds,
+    String status = 'completed',
+    String? note,
+  }) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/tasks/batch-complete'),
+      headers: await _headers(),
+      body: json.encode({
+        'project_id': projectId,
+        'task_ids': taskIds,
+        'status': status,
+        if (note != null && note.isNotEmpty) 'note': note,
+      }),
+    );
+    if (r.statusCode == 200) {
+      return (json.decode(r.body) as Map)['processed'] as int;
+    }
+    throw _err(r, 'Failed to batch-$status tasks');
+  }
+
   static Future<Task> toggleComplete(int id, {String? note}) async {
     final r = await http.post(
       Uri.parse('$_baseUrl/tasks/$id/complete'),

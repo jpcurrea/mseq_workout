@@ -1043,7 +1043,11 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           InkWell(
-            onTap: () => setState(() => _chatExpanded = !_chatExpanded),
+            onTap: () {
+              final wasCollapsed = !_chatExpanded;
+              setState(() => _chatExpanded = !_chatExpanded);
+              if (wasCollapsed) _scrollChatToBottom();
+            },
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               child: Row(

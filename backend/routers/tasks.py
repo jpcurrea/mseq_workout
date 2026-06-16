@@ -860,6 +860,166 @@ async def import_tasks_csv(
     }
 
 
+# ── Batch endpoints ────────────────────────────────────────────────────────────
+
+class BatchDeleteBody(BaseModel):
+    task_ids: List[int]
+    project_id: int
+
+
+class BatchUpdateBody(BaseModel):
+    task_ids: List[int]
+    project_id: int
+    # Tags — send tag_ids (existing) and/or tag_names (new or existing by name;
+    # resolved/created server-side).  Both lists are merged before applying.
+    tag_ids: Optional[List[int]] = None
+    tag_names: Optional[List[str]] = None  # names to find-or-create
+    tag_mode: str = "overwrite"  # "overwrite" | "add"
+    # Optional scalar fields (only applied when not None)
+    due_date: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    is_recurring: Optional[bool] = None
+    recurrence_rule: Optional[str] = None
+
+
+class BatchCompleteBody(BaseModel):
+    task_ids: List[int]
+    project_id: int
+    status: str = "completed"  # "completed" | "skipped"
+    note: Optional[str] = None
+
+
+@tasks_router.post("/batch-delete")
+async def batch_delete_tasks(
+    body: BatchDeleteBody,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Delete multiple tasks at once. Only deletes tasks belonging to the
+    specified project that the user has write access to."""
+    _assert_can_write(body.project_id, user_id, session)
+    if not body.task_ids:
+        return {"deleted": 0, "task_ids": []}
+    tasks = session.query(Task).filter(
+        Task.id.in_(body.task_ids),
+        Task.project_id == body.project_id,
+    ).all()
+    deleted_ids = [t.id for t in tasks]
+    for t in tasks:
+        session.delete(t)
+    session.commit()
+    return {"deleted": len(deleted_ids), "task_ids": deleted_ids}
+
+
+@tasks_router.post("/batch-update")
+async def batch_update_tasks(
+    body: BatchUpdateBody,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Batch-edit a set of tasks. Each field is optional; only provided fields
+    are changed. For tags, tag_mode controls whether the new list replaces
+    (overwrite) or extends (add) the existing tags on each task."""
+    _assert_can_write(body.project_id, user_id, session)
+    if not body.task_ids:
+        return {"updated": 0, "task_ids": []}
+
+    tasks = session.query(Task).options(
+        selectinload(Task.tags),
+    ).filter(
+        Task.id.in_(body.task_ids),
+        Task.project_id == body.project_id,
+    ).all()
+
+    now = datetime.datetime.utcnow()
+
+    # Resolve tags once for all tasks.
+    # Merge explicit tag_ids with find-or-create tag_names.
+    new_tags = None
+    if body.tag_ids is not None or body.tag_names is not None:
+        # Start from explicit IDs.
+        resolved_ids: List[int] = list(body.tag_ids or [])
+        # Find-or-create by name.
+        if body.tag_names:
+            existing_tags = {t.name.lower(): t for t in session.query(Tag).filter(Tag.user_id == user_id).all()}
+            for raw in body.tag_names:
+                name = raw.strip()
+                if not name:
+                    continue
+                tag = existing_tags.get(name.lower())
+                if tag is None:
+                    tag = Tag(user_id=user_id, name=name, color="#6366f1")
+                    session.add(tag)
+                    session.flush()
+                    existing_tags[name.lower()] = tag
+                if tag.id not in resolved_ids:
+                    resolved_ids.append(tag.id)
+        new_tags = session.query(Tag).filter(Tag.id.in_(resolved_ids)).all() if resolved_ids else []
+
+    # Parse due_date once.
+    new_due: Optional[datetime.datetime] = None
+    if body.due_date is not None:
+        try:
+            new_due = datetime.datetime.fromisoformat(body.due_date) if body.due_date else None
+        except ValueError:
+            raise HTTPException(status_code=422, detail="due_date must be ISO datetime string")
+
+    for task in tasks:
+        if new_tags is not None:
+            if body.tag_mode == "add":
+                existing_ids = {t.id for t in task.tags}
+                task.tags = list(task.tags) + [t for t in new_tags if t.id not in existing_ids]
+            else:  # overwrite
+                task.tags = new_tags
+
+        if body.due_date is not None:
+            task.due_date = new_due
+        if body.duration_minutes is not None:
+            task.duration_minutes = body.duration_minutes
+        if body.is_recurring is not None:
+            task.is_recurring = body.is_recurring
+        if body.recurrence_rule is not None:
+            task.recurrence_rule = body.recurrence_rule
+        task.updated_at = now
+
+    session.commit()
+    return {"updated": len(tasks), "task_ids": [t.id for t in tasks]}
+
+
+@tasks_router.post("/batch-complete")
+async def batch_complete_tasks(
+    body: BatchCompleteBody,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Mark multiple tasks as completed or skipped in one request.
+
+    Recurring tasks are advanced to their next due date (same as the single-task
+    endpoint). Non-recurring tasks are simply marked completed/skipped."""
+    _assert_can_write(body.project_id, user_id, session)
+    if body.status not in ("completed", "skipped"):
+        raise HTTPException(status_code=422, detail="status must be 'completed' or 'skipped'")
+    if not body.task_ids:
+        return {"processed": 0, "task_ids": []}
+
+    tasks = session.query(Task).options(
+        selectinload(Task.tags),
+        selectinload(Task.work_sessions),
+    ).filter(
+        Task.id.in_(body.task_ids),
+        Task.project_id == body.project_id,
+        Task.is_completed.is_(False),
+    ).all()
+
+    now = datetime.datetime.utcnow()
+    for task in tasks:
+        _mark_task_done(task, user_id, session, now, status=body.status, note=body.note or None)
+        task.updated_at = now
+
+    session.commit()
+    return {"processed": len(tasks), "task_ids": [t.id for t in tasks]}
+
+
 # ── Individual task endpoints ──────────────────────────────────────────────────
 
 @tasks_router.get("/{task_id}")
@@ -1184,7 +1344,7 @@ async def get_plan(
     for tid in set(token_ids):
         t = (
             session.query(Task)
-            .filter(Task.id == tid, Task.user_id == user_id)
+            .filter(Task.id == tid, Task.project_id == plan.project_id)
             .options(selectinload(Task.tags), selectinload(Task.work_sessions))
             .first()
         )

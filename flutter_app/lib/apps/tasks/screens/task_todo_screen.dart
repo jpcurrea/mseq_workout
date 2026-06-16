@@ -48,6 +48,10 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   bool _flatView = false;
   TaskSortMode _sortMode = TaskSortMode.timeLeft;
 
+  // ── Multi-select state ──────────────────────────────────────────────────────
+  bool _selectionMode = false;
+  final Set<int> _selectedTaskIds = {};
+
   @override
   void initState() {
     super.initState();
@@ -201,6 +205,128 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     try {
       await TaskApiService.deleteTask(task.id);
       setState(() => _tasks.removeWhere((t) => t.id == task.id));
+    } catch (e) {
+      _showError(e.toString());
+    }
+  }
+
+  // ── Multi-select helpers ────────────────────────────────────────────────────
+
+  void _enterSelectionMode(int taskId) {
+    setState(() {
+      _selectionMode = true;
+      _selectedTaskIds.add(taskId);
+    });
+  }
+
+  void _exitSelectionMode() {
+    setState(() {
+      _selectionMode = false;
+      _selectedTaskIds.clear();
+    });
+  }
+
+  void _toggleTaskSelection(int taskId) {
+    setState(() {
+      if (_selectedTaskIds.contains(taskId)) {
+        _selectedTaskIds.remove(taskId);
+        if (_selectedTaskIds.isEmpty) _selectionMode = false;
+      } else {
+        _selectedTaskIds.add(taskId);
+      }
+    });
+  }
+
+  Future<void> _batchDelete() async {
+    if (_activeProject == null || _selectedTaskIds.isEmpty) return;
+    final count = _selectedTaskIds.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete selected tasks?'),
+        content: Text(
+          'Permanently delete $count task${count == 1 ? '' : 's'}? '
+          'This cannot be undone.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await TaskApiService.batchDeleteTasks(
+        projectId: _activeProject!.id,
+        taskIds: _selectedTaskIds.toList(),
+      );
+      _exitSelectionMode();
+      await _loadTasks();
+    } catch (e) {
+      _showError(e.toString());
+    }
+  }
+
+  Future<void> _batchEdit() async {
+    if (_activeProject == null || _selectedTaskIds.isEmpty) return;
+    final result = await showDialog<_BatchEditResult>(
+      context: context,
+      builder: (_) => _BatchEditDialog(tags: _tags),
+    );
+    if (result == null) return;
+    try {
+      await TaskApiService.batchUpdateTasks(
+        projectId: _activeProject!.id,
+        taskIds: _selectedTaskIds.toList(),
+        tagIds: result.tagIds,
+        tagNames: result.tagNames,
+        tagMode: result.tagMode,
+        dueDate: result.dueDate,
+        durationMinutes: result.durationMinutes,
+        isRecurring: result.isRecurring,
+        recurrenceRule: result.recurrenceRule,
+      );
+      _exitSelectionMode();
+      await _loadTasks();
+    } catch (e) {
+      _showError(e.toString());
+    }
+  }
+
+  Future<void> _batchComplete({required String status}) async {
+    if (_activeProject == null || _selectedTaskIds.isEmpty) return;
+    final n = _selectedTaskIds.length;
+    final label = status == 'skipped' ? 'Skip' : 'Complete';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('$label selected tasks?'),
+        content: Text(
+          '$label $n task${n == 1 ? '' : 's'}? '
+          'Recurring tasks will advance to their next occurrence.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(label),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await TaskApiService.batchCompleteTasks(
+        projectId: _activeProject!.id,
+        taskIds: _selectedTaskIds.toList(),
+        status: status,
+      );
+      _exitSelectionMode();
+      await _loadTasks();
     } catch (e) {
       _showError(e.toString());
     }
@@ -730,82 +856,148 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     );
   }
 
+  // ── AppBar builders ─────────────────────────────────────────────────────────
+
+  PreferredSizeWidget _buildNormalAppBar() {
+    return AppBar(
+      title: GestureDetector(
+        onTap: _showProjectSwitcher,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(
+                _activeProject?.name ?? 'Tasks',
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const Icon(Icons.arrow_drop_down, size: 20),
+          ],
+        ),
+      ),
+      leading: IconButton(
+        icon: const Icon(Icons.arrow_back),
+        onPressed: () {
+          if (Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          } else {
+            Navigator.of(context).pushReplacementNamed('/hub');
+          }
+        },
+      ),
+      actions: [
+        IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+        IconButton(
+          icon: Icon(_flatView ? Icons.view_list : Icons.account_tree),
+          tooltip: _flatView
+              ? 'Flat view (all tasks individually)'
+              : 'Grouped view (subtasks nested)',
+          onPressed: () => _setFlatView(!_flatView),
+        ),
+        IconButton(
+          icon: Icon(_expandAll ? Icons.unfold_less : Icons.unfold_more),
+          tooltip: _expandAll ? 'Collapse all' : 'Expand all',
+          onPressed: () => _setExpandAll(!_expandAll),
+        ),
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.menu),
+          onSelected: (v) {
+            switch (v) {
+              case 'todo':    break;
+              case 'calendar': _navigateTo('/tasks/calendar'); break;
+              case 'gantt':    _navigateTo('/tasks/gantt'); break;
+              case 'plans':    _navigateTo('/tasks/plans'); break;
+              case 'history':  _navigateTo('/tasks/completions'); break;
+              case 'settings': _showSettings(); break;
+              case 'share':    _showInvite(); break;
+              case 'join':     _showJoinProject(); break;
+              case 'import_csv': _importCsv(); break;
+            }
+          },
+          itemBuilder: (_) => [
+            const PopupMenuItem(value: 'todo', child: ListTile(leading: Icon(Icons.check_circle_outline), title: Text('Todo'))),
+            const PopupMenuItem(value: 'calendar', child: ListTile(leading: Icon(Icons.calendar_month), title: Text('Calendar'))),
+            const PopupMenuItem(value: 'gantt', child: ListTile(leading: Icon(Icons.view_timeline), title: Text('Gantt'))),
+            const PopupMenuItem(value: 'plans', child: ListTile(leading: Icon(Icons.description_outlined), title: Text('Plans'))),
+            const PopupMenuItem(value: 'history', child: ListTile(leading: Icon(Icons.history), title: Text('Completion history'))),
+            const PopupMenuDivider(),
+            if (_activeProject?.canWrite == true)
+              const PopupMenuItem(value: 'share', child: ListTile(leading: Icon(Icons.share_outlined), title: Text('Share project'))),
+            if (_activeProject?.canWrite == true)
+              const PopupMenuItem(value: 'import_csv', child: ListTile(leading: Icon(Icons.upload_file_outlined), title: Text('Import CSV'))),
+            const PopupMenuItem(value: 'join', child: ListTile(leading: Icon(Icons.group_add_outlined), title: Text('Join project'))),
+            const PopupMenuDivider(),
+            const PopupMenuItem(value: 'settings', child: ListTile(leading: Icon(Icons.settings_outlined), title: Text('Settings'))),
+          ],
+        ),
+      ],
+    );
+  }
+
+  PreferredSizeWidget _buildSelectionAppBar() {
+    final n = _selectedTaskIds.length;
+    return AppBar(
+      backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+      leading: IconButton(
+        icon: const Icon(Icons.close),
+        tooltip: 'Cancel selection',
+        onPressed: _exitSelectionMode,
+      ),
+      title: Text('$n selected'),
+      actions: [
+        if (_activeProject?.canWrite == true) ...[
+          IconButton(
+            icon: const Icon(Icons.check_circle_outline),
+            tooltip: 'Mark selected as complete',
+            onPressed: () => _batchComplete(status: 'completed'),
+          ),
+          IconButton(
+            icon: const Icon(Icons.skip_next_outlined),
+            tooltip: 'Skip selected (recurring: advance to next)',
+            onPressed: () => _batchComplete(status: 'skipped'),
+          ),
+          IconButton(
+            icon: const Icon(Icons.edit_outlined),
+            tooltip: 'Batch edit',
+            onPressed: _batchEdit,
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            tooltip: 'Delete selected',
+            onPressed: _batchDelete,
+          ),
+        ],
+        // Select-all / deselect-all
+        IconButton(
+          icon: Icon(
+            _selectedTaskIds.length == _displayTasks.length
+                ? Icons.deselect
+                : Icons.select_all,
+          ),
+          tooltip: _selectedTaskIds.length == _displayTasks.length
+              ? 'Deselect all'
+              : 'Select all',
+          onPressed: () {
+            setState(() {
+              if (_selectedTaskIds.length == _displayTasks.length) {
+                _selectedTaskIds.clear();
+                _selectionMode = false;
+              } else {
+                _selectedTaskIds
+                  ..clear()
+                  ..addAll(_displayTasks.map((t) => t.id));
+              }
+            });
+          },
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: GestureDetector(
-          onTap: _showProjectSwitcher,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Flexible(
-                child: Text(
-                  _activeProject?.name ?? 'Tasks',
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              const Icon(Icons.arrow_drop_down, size: 20),
-            ],
-          ),
-        ),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () {
-            if (Navigator.of(context).canPop()) {
-              Navigator.of(context).pop();
-            } else {
-              Navigator.of(context).pushReplacementNamed('/hub');
-            }
-          },
-        ),
-        actions: [
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
-          IconButton(
-            icon: Icon(_flatView ? Icons.view_list : Icons.account_tree),
-            tooltip: _flatView
-                ? 'Flat view (all tasks individually)'
-                : 'Grouped view (subtasks nested)',
-            onPressed: () => _setFlatView(!_flatView),
-          ),
-          IconButton(
-            icon: Icon(_expandAll ? Icons.unfold_less : Icons.unfold_more),
-            tooltip: _expandAll ? 'Collapse all' : 'Expand all',
-            onPressed: () => _setExpandAll(!_expandAll),
-          ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.menu),
-            onSelected: (v) {
-              switch (v) {
-                case 'todo':    break;
-                case 'calendar': _navigateTo('/tasks/calendar'); break;
-                case 'gantt':    _navigateTo('/tasks/gantt'); break;
-                case 'plans':    _navigateTo('/tasks/plans'); break;
-                case 'history':  _navigateTo('/tasks/completions'); break;
-                case 'settings': _showSettings(); break;
-                case 'share':    _showInvite(); break;
-                case 'join':     _showJoinProject(); break;
-                case 'import_csv': _importCsv(); break;
-              }
-            },
-            itemBuilder: (_) => [
-              const PopupMenuItem(value: 'todo', child: ListTile(leading: Icon(Icons.check_circle_outline), title: Text('Todo'))),
-              const PopupMenuItem(value: 'calendar', child: ListTile(leading: Icon(Icons.calendar_month), title: Text('Calendar'))),
-              const PopupMenuItem(value: 'gantt', child: ListTile(leading: Icon(Icons.view_timeline), title: Text('Gantt'))),
-              const PopupMenuItem(value: 'plans', child: ListTile(leading: Icon(Icons.description_outlined), title: Text('Plans'))),
-              const PopupMenuItem(value: 'history', child: ListTile(leading: Icon(Icons.history), title: Text('Completion history'))),
-              const PopupMenuDivider(),
-              if (_activeProject?.canWrite == true)
-                const PopupMenuItem(value: 'share', child: ListTile(leading: Icon(Icons.share_outlined), title: Text('Share project'))),
-              if (_activeProject?.canWrite == true)
-                const PopupMenuItem(value: 'import_csv', child: ListTile(leading: Icon(Icons.upload_file_outlined), title: Text('Import CSV'))),
-              const PopupMenuItem(value: 'join', child: ListTile(leading: Icon(Icons.group_add_outlined), title: Text('Join project'))),
-              const PopupMenuDivider(),
-              const PopupMenuItem(value: 'settings', child: ListTile(leading: Icon(Icons.settings_outlined), title: Text('Settings'))),
-            ],
-          ),
-        ],
-      ),
+      appBar: _selectionMode ? _buildSelectionAppBar() : _buildNormalAppBar(),
       body: Column(
         children: [
           // Tag filter + completed toggle
@@ -930,29 +1122,353 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
             itemCount: sorted.length,
             itemBuilder: (_, i) {
               final task = sorted[i];
-              return _TaskCompletionWrapper(
-                key: ValueKey(task.id),
-                completing: _completingTaskIds.contains(task.id),
-                onDismissed: () => _onCompletionAnimationDone(task.id),
-                child: TaskCardTree(
-                  task: task,
-                  activeSessions: {for (final id in _activeSessions) id: true},
-                  expandAll: _expandAll,
-                  renderSubtasks: !_flatView,
-                  subtaskSort: subtaskSort,
-                  timeUnit: _timeUnit,
-                  onComplete: _toggleComplete,
-                  onSkip: _skipTask,
-                  onEdit: (t) => _openForm(task: t),
-                  onDelete: _deleteTask,
-                  onStartSession: _startSession,
-                  onStopSession: _stopSession,
+              final isSelected = _selectedTaskIds.contains(task.id);
+              final cardTree = TaskCardTree(
+                task: task,
+                activeSessions: {for (final id in _activeSessions) id: true},
+                expandAll: _expandAll,
+                renderSubtasks: !_flatView,
+                subtaskSort: subtaskSort,
+                timeUnit: _timeUnit,
+                onComplete: _selectionMode ? null : _toggleComplete,
+                onSkip: _selectionMode ? null : _skipTask,
+                onEdit: _selectionMode ? null : (t) => _openForm(task: t),
+                onDelete: _selectionMode ? null : _deleteTask,
+                onStartSession: _selectionMode ? null : _startSession,
+                onStopSession: _selectionMode ? null : _stopSession,
+              );
+              return GestureDetector(
+                onLongPress: _selectionMode ? null : () => _enterSelectionMode(task.id),
+                onTap: _selectionMode ? () => _toggleTaskSelection(task.id) : null,
+                child: _TaskCompletionWrapper(
+                  key: ValueKey(task.id),
+                  completing: _completingTaskIds.contains(task.id),
+                  onDismissed: () => _onCompletionAnimationDone(task.id),
+                  child: _selectionMode
+                      ? Stack(
+                          children: [
+                            // Tint when selected
+                            if (isSelected)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .primary
+                                          .withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Checkbox(
+                                  value: isSelected,
+                                  onChanged: (_) => _toggleTaskSelection(task.id),
+                                ),
+                                Expanded(child: cardTree),
+                              ],
+                            ),
+                          ],
+                        )
+                      : cardTree,
                 ),
               );
             },
           );
         },
       ),
+    );
+  }
+}
+
+// ── Batch-edit dialog data ─────────────────────────────────────────────────────
+
+class _BatchEditResult {
+  final List<int>? tagIds;
+  final List<String>? tagNames; // new tags to create
+  final String tagMode;
+  final String? dueDate;
+  final int? durationMinutes;
+  final bool? isRecurring;
+  final String? recurrenceRule;
+
+  const _BatchEditResult({
+    this.tagIds,
+    this.tagNames,
+    this.tagMode = 'overwrite',
+    this.dueDate,
+    this.durationMinutes,
+    this.isRecurring,
+    this.recurrenceRule,
+  });
+}
+
+/// Dialog for batch-editing multiple tasks.
+/// The user can choose to update tags (with overwrite or add mode) and
+/// optionally other scalar fields. Only fields whose toggle is enabled are sent.
+class _BatchEditDialog extends StatefulWidget {
+  final List<Tag> tags;
+
+  const _BatchEditDialog({required this.tags});
+
+  @override
+  State<_BatchEditDialog> createState() => _BatchEditDialogState();
+}
+
+class _BatchEditDialogState extends State<_BatchEditDialog> {
+  // Tags
+  bool _editTags = false;
+  String _tagMode = 'overwrite';
+  final Set<int> _chosenTagIds = {};
+  final TextEditingController _newTagCtrl = TextEditingController();
+  // Names typed by the user (not yet in the project's tag list)
+  final List<String> _newTagNames = [];
+
+  // Due date
+  bool _editDueDate = false;
+  DateTime? _dueDate;
+
+  // Duration
+  bool _editDuration = false;
+  final TextEditingController _durationCtrl = TextEditingController();
+
+  // Recurrence
+  bool _editRecurrence = false;
+  bool _isRecurring = false;
+  String _recurrenceRule = 'DAILY';
+
+  @override
+  void dispose() {
+    _newTagCtrl.dispose();
+    _durationCtrl.dispose();
+    super.dispose();
+  }
+
+  void _addNewTag() {
+    final name = _newTagCtrl.text.trim();
+    if (name.isEmpty) return;
+    // Avoid duplicates with existing project tags
+    final alreadyExists = widget.tags.any(
+      (t) => t.name.toLowerCase() == name.toLowerCase(),
+    );
+    if (alreadyExists) {
+      // Auto-select it instead of adding a duplicate entry
+      final tag = widget.tags.firstWhere(
+        (t) => t.name.toLowerCase() == name.toLowerCase(),
+      );
+      setState(() => _chosenTagIds.add(tag.id));
+    } else if (!_newTagNames.any((n) => n.toLowerCase() == name.toLowerCase())) {
+      setState(() => _newTagNames.add(name));
+    }
+    _newTagCtrl.clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasAnyEdit = _editTags || _editDueDate || _editDuration || _editRecurrence;
+    return AlertDialog(
+      title: const Text('Batch Edit'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ── Tags ──
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Edit tags'),
+              value: _editTags,
+              onChanged: (v) => setState(() => _editTags = v),
+            ),
+            if (_editTags) ...[
+              const SizedBox(height: 4),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'overwrite', label: Text('Overwrite')),
+                  ButtonSegment(value: 'add', label: Text('Add')),
+                ],
+                selected: {_tagMode},
+                onSelectionChanged: (s) => setState(() => _tagMode = s.first),
+              ),
+              const SizedBox(height: 8),
+              // Existing project tags
+              if (widget.tags.isNotEmpty)
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: widget.tags.map((tag) {
+                    final selected = _chosenTagIds.contains(tag.id);
+                    return FilterChip(
+                      label: Text(tag.name),
+                      selected: selected,
+                      onSelected: (v) => setState(() {
+                        if (v) _chosenTagIds.add(tag.id);
+                        else _chosenTagIds.remove(tag.id);
+                      }),
+                    );
+                  }).toList(),
+                ),
+              // New tags typed by the user
+              if (_newTagNames.isNotEmpty)
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: _newTagNames.map((name) => Chip(
+                    label: Text(name),
+                    avatar: const Icon(Icons.add, size: 14),
+                    onDeleted: () => setState(() => _newTagNames.remove(name)),
+                  )).toList(),
+                ),
+              const SizedBox(height: 6),
+              // Input to add a new tag name
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _newTagCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'New tag name',
+                        hintText: 'Type and press +',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                      onSubmitted: (_) => _addNewTag(),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    icon: const Icon(Icons.add_circle_outline),
+                    tooltip: 'Add tag',
+                    onPressed: _addNewTag,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+
+            // ── Due date ──
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Edit due date'),
+              value: _editDueDate,
+              onChanged: (v) => setState(() => _editDueDate = v),
+            ),
+            if (_editDueDate) ...[
+              OutlinedButton.icon(
+                icon: const Icon(Icons.calendar_today, size: 16),
+                label: Text(
+                  _dueDate == null
+                      ? 'Pick date/time'
+                      : '${_dueDate!.year}-${_dueDate!.month.toString().padLeft(2, '0')}-${_dueDate!.day.toString().padLeft(2, '0')} '
+                        '${_dueDate!.hour.toString().padLeft(2, '0')}:${_dueDate!.minute.toString().padLeft(2, '0')}',
+                ),
+                onPressed: () async {
+                  final now = DateTime.now();
+                  final d = await showDatePicker(
+                    context: context,
+                    initialDate: _dueDate ?? now,
+                    firstDate: DateTime(now.year - 1),
+                    lastDate: DateTime(now.year + 5),
+                  );
+                  if (d == null) return;
+                  final t = await showTimePicker(
+                    // ignore: use_build_context_synchronously
+                    context: context,
+                    initialTime: TimeOfDay.fromDateTime(_dueDate ?? now),
+                  );
+                  setState(() {
+                    _dueDate = DateTime(
+                      d.year, d.month, d.day,
+                      t?.hour ?? 0, t?.minute ?? 0,
+                    );
+                  });
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+
+            // ── Duration ──
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Edit duration (minutes)'),
+              value: _editDuration,
+              onChanged: (v) => setState(() => _editDuration = v),
+            ),
+            if (_editDuration) ...[
+              TextField(
+                controller: _durationCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Duration (minutes)',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+
+            // ── Recurrence ──
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Edit recurrence'),
+              value: _editRecurrence,
+              onChanged: (v) => setState(() => _editRecurrence = v),
+            ),
+            if (_editRecurrence) ...[
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Recurring'),
+                value: _isRecurring,
+                onChanged: (v) => setState(() => _isRecurring = v),
+              ),
+              if (_isRecurring)
+                DropdownButtonFormField<String>(
+                  value: _recurrenceRule,
+                  decoration: const InputDecoration(labelText: 'Rule', isDense: true, border: OutlineInputBorder()),
+                  items: const [
+                    DropdownMenuItem(value: 'DAILY', child: Text('Daily')),
+                    DropdownMenuItem(value: 'WEEKDAYS', child: Text('Every weekday (Mon–Fri)')),
+                    DropdownMenuItem(value: 'WEEKLY', child: Text('Weekly')),
+                    DropdownMenuItem(value: 'MONTHLY', child: Text('Monthly')),
+                  ],
+                  onChanged: (v) => setState(() => _recurrenceRule = v ?? _recurrenceRule),
+                ),
+              const SizedBox(height: 8),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        ElevatedButton(
+          onPressed: hasAnyEdit
+              ? () {
+                  final duration = _editDuration
+                      ? int.tryParse(_durationCtrl.text.trim())
+                      : null;
+                  Navigator.pop(
+                    context,
+                    _BatchEditResult(
+                      tagIds: _editTags ? _chosenTagIds.toList() : null,
+                      tagNames: (_editTags && _newTagNames.isNotEmpty)
+                          ? List.unmodifiable(_newTagNames)
+                          : null,
+                      tagMode: _tagMode,
+                      dueDate: _editDueDate ? _dueDate?.toIso8601String() : null,
+                      durationMinutes: _editDuration ? duration : null,
+                      isRecurring: _editRecurrence ? _isRecurring : null,
+                      recurrenceRule: (_editRecurrence && _isRecurring) ? _recurrenceRule : null,
+                    ),
+                  );
+                }
+              : null,
+          child: const Text('Apply'),
+        ),
+      ],
     );
   }
 }

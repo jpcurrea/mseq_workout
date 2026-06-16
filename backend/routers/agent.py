@@ -509,6 +509,10 @@ SCOPE
   read any of them with the read_plan tool to inform your work — e.g. consult a
   high-level/long-term plan while drafting a more specific one. You can read
   other plans but only write to the current plan.
+- Use list_tasks to search, query, or inspect tasks in the current project — for
+  example, to find overdue tasks, tasks matching a keyword, or tasks with a
+  specific tag. The project context already contains a summary of tasks, but
+  list_tasks gives you full detail and supports filtering.
 - The user may attach files (PDFs, text, images). Use their contents to inform
   planning. Scanned PDFs may be shown to you as page images. If an attachment is
   unreadable or missing, say so rather than guessing its contents.
@@ -542,19 +546,43 @@ ACTIONS & APPROVAL
   context. To clean up duplicates, delete the extras and keep one. Do not
   "recreate" tasks to fix mistakes — update or delete the existing ones.
 - CRITICAL: When a plan is open, you may ONLY call delete_task for tasks that
-  are already embedded in that plan via {{task:ID}} tokens. Never delete tasks
+  are already embedded in that plan via {{{{task:ID}}}} tokens. Never delete tasks
   that are not referenced in the current plan — doing so will be rejected. If
   a task is not in the plan, do not delete it; update or ignore it instead.
 - After you finish your tool calls, always reply to the user in plain text
   summarizing what you created, updated, or deleted.
 - To embed a task in a plan (whether interspersed with text OR at the end),
-  ALWAYS use write_plan. Place {{task:ID}} tokens on their own line exactly
+  ALWAYS use write_plan. Place {{{{task:ID}}}} tokens on their own line exactly
   where each task should appear in the document. The plan content is given to
   you in the context (or call read_plan on the current plan id to get the full
   text). Rewrite the full content with the tokens in the right positions.
   NEVER use insert_task_into_plan — it only appends to the end and has been
   removed. Never reference a task id you have not seen in the project context
   or a create_task result — such tokens are rejected.
+
+TASK WIDGET RENDERING — CRITICAL
+  Token format: {{{{task:42}}}} where 42 is the integer task id. Two opening
+  curly braces, then task:ID, then two closing curly braces. Single braces
+  are NOT recognised — always use the double-brace form.
+  When the plan is displayed in the app, every {{{{task:ID}}}} token is replaced
+  by a rich interactive widget that automatically shows:
+    • Title
+    • Due date and time
+    • Estimated duration
+    • Tags (colored chips)
+    • Urgency color bar (based on time remaining vs. duration)
+    • Actual time logged vs. estimate (progress bar)
+    • Start/stop work-session button, complete button, skip button, edit button
+    • Completion history and punctuality badges
+  Because the widget already renders all this information beautifully, you
+  MUST NOT re-state task titles, due dates, durations, or tags in plain text
+  next to a {{{{task:ID}}}} token. Do not write bullet lists or tables that repeat
+  task details — use the token and let the widget do the work.
+  RULE: Any time you are about to write a task title, due date, or duration
+  in plain markdown, ask yourself: does this task exist in the project?
+  If yes, embed it with {{{{task:ID}}}} instead. Only use plain text for tasks
+  that cannot be created (e.g. conceptual placeholders you have not yet
+  decided to create).
 - For bulk or destructive changes, describe what you will do and ask for
   confirmation before calling tools.
 - Set durations and due dates realistically; flag when a deadline looks
@@ -799,6 +827,36 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "list_tasks",
+                "description": (
+                    "List tasks in the current project. Use this to query, search, "
+                    "or inspect tasks — e.g. find overdue tasks, tasks with a specific tag, "
+                    "or tasks without due dates. Returns id, title, due_date, duration_minutes, "
+                    "is_completed, is_recurring, recurrence_rule, and tags for each task."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "include_completed": {
+                            "type": "boolean",
+                            "description": "Include completed tasks (default false).",
+                        },
+                        "tag": {
+                            "type": "string",
+                            "description": "Filter to tasks whose tags contain this string (case-insensitive).",
+                        },
+                        "search": {
+                            "type": "string",
+                            "description": "Filter to tasks whose title or description contains this substring (case-insensitive).",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "read_plan",
                 "description": (
                     "Read the full markdown content of any plan in THIS project (read-only). "
@@ -851,7 +909,7 @@ def _ensure_tag_ids(
 _TASK_TOKEN_RE = re.compile(r"\{\{task:(\d+)\}\}")
 
 # Tools that only read data — they execute immediately and never require approval.
-_READ_ONLY_TOOLS = {"read_plan"}
+_READ_ONLY_TOOLS = {"read_plan", "list_tasks"}
 
 
 def _validate_plan_task_tokens(
@@ -1143,6 +1201,41 @@ def _execute_planning_tool_call(
             "plan_id": plan.id,
             "position": position,
             "title": task.title,
+        }
+
+    if name == "list_tasks":
+        include_completed = bool(args.get("include_completed", False))
+        tag_filter = (args.get("tag") or "").strip().lower()
+        search_filter = (args.get("search") or "").strip().lower()
+
+        q = session.query(Task).options(selectinload(Task.tags)).filter(
+            Task.project_id == project_id
+        )
+        if not include_completed:
+            q = q.filter(Task.is_completed.is_(False))
+        tasks = q.order_by(Task.due_date.asc().nulls_last(), Task.created_at.asc()).all()
+
+        results = []
+        for t in tasks:
+            if tag_filter and not any(tag_filter in tg.name.lower() for tg in t.tags):
+                continue
+            if search_filter and search_filter not in (t.title or "").lower() and search_filter not in (t.description or "").lower():
+                continue
+            results.append({
+                "id": t.id,
+                "title": t.title,
+                "due_date": t.due_date.isoformat() if t.due_date else None,
+                "duration_minutes": t.duration_minutes,
+                "is_completed": t.is_completed,
+                "is_recurring": t.is_recurring,
+                "recurrence_rule": t.recurrence_rule,
+                "tags": [tg.name for tg in t.tags],
+            })
+        return {
+            "ok": True,
+            "action": "list_tasks",
+            "count": len(results),
+            "tasks": results,
         }
 
     if name == "read_plan":
