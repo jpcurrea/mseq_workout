@@ -435,7 +435,7 @@ def _build_project_context(
                 {
                     "id": p.id,
                     "title": p.title,
-                    "content": p.content[:3000],
+                    "content": p.content[:8000],
                     "updated_at": p.updated_at.isoformat() if p.updated_at else p.created_at.isoformat(),
                 }
                 for p in plans
@@ -547,12 +547,14 @@ ACTIONS & APPROVAL
   a task is not in the plan, do not delete it; update or ignore it instead.
 - After you finish your tool calls, always reply to the user in plain text
   summarizing what you created, updated, or deleted.
-- To embed a task inside a plan document, the task must already exist (create
-  it first and use the returned id). To place tasks INTERSPERSED with text, call
-  write_plan and put a {{task:ID}} token on its own line where each task should
-  appear. For a simple add-to-end, insert_task_into_plan is fine. Never
-  reference a task id you have not seen in the project context or a create_task
-  result — such tokens are rejected.
+- To embed a task in a plan (whether interspersed with text OR at the end),
+  ALWAYS use write_plan. Place {{task:ID}} tokens on their own line exactly
+  where each task should appear in the document. The plan content is given to
+  you in the context (or call read_plan on the current plan id to get the full
+  text). Rewrite the full content with the tokens in the right positions.
+  NEVER use insert_task_into_plan — it only appends to the end and has been
+  removed. Never reference a task id you have not seen in the project context
+  or a create_task result — such tokens are rejected.
 - For bulk or destructive changes, describe what you will do and ask for
   confirmation before calling tools.
 - Set durations and due dates realistically; flag when a deadline looks
@@ -797,44 +799,12 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": "insert_task_into_plan",
-                "description": (
-                    "Append/prepend a SINGLE existing task widget to a plan without "
-                    "rewriting it. Use this only for simple add-to-end/start cases; "
-                    "to place tasks interspersed with text, use write_plan with inline "
-                    "{{task:ID}} tokens instead. The task must already exist in this "
-                    "project (use create_task first, then pass the returned task_id)."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": {
-                            "type": "integer",
-                            "description": "Id of an existing task in this project.",
-                        },
-                        "plan_id": {
-                            "type": "integer",
-                            "description": "Target plan id. Defaults to the current plan if omitted.",
-                        },
-                        "position": {
-                            "type": "string",
-                            "enum": ["end", "start"],
-                            "description": "Where to place the widget. Defaults to end.",
-                        },
-                    },
-                    "required": ["task_id"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
                 "name": "read_plan",
                 "description": (
-                    "Read the full markdown content of another plan in THIS project "
-                    "(read-only). Use the id of a plan listed in other_plans, e.g. to "
-                    "consult a high-level plan while drafting a more specific one. You "
-                    "cannot modify other plans."
+                    "Read the full markdown content of any plan in THIS project (read-only). "
+                    "Use this to get the complete current plan content before calling write_plan "
+                    "(the context only shows the first 8000 characters). You can also use it to "
+                    "consult other plans listed in other_plans."
                 ),
                 "parameters": {
                     "type": "object",
