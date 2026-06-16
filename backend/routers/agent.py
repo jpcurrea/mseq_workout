@@ -1604,6 +1604,13 @@ async def agent_chat(
                             "content": json.dumps(result, ensure_ascii=True),
                         }
                     )
+
+            # In approval mode, once we've collected proposed tool calls we
+            # must stop looping — otherwise the model sees the dry-run "ok"
+            # results and proposes the exact same actions again on the next
+            # iteration, duplicating every entry in the approval queue.
+            if proposed_tool_calls:
+                break
             continue
 
         reply = ai_msg.get("content") if isinstance(ai_msg, dict) else None

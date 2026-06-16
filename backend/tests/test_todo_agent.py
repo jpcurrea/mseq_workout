@@ -611,3 +611,99 @@ class TestAgentChatTodoMode:
         # And the task must NOT have been created.
         task = db.query(Task).filter(Task.title == "Agent Created Task").first()
         assert task is None, "Viewer should not be able to create tasks"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Regression: approval-mode loop must not duplicate proposed tool calls
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestApprovalModeDuplicationRegression:
+    """
+    Regression for the bug where the agent loop continued after collecting
+    proposed tool calls in approval mode, causing the model to re-propose the
+    same actions on each iteration (up to 8×).
+
+    The LLM mock always returns a tool call on every invocation so that the
+    bug would trigger if the early-break guard is missing.
+    """
+
+    @pytest.fixture
+    def mock_llm_always_calls_tool(self):
+        """LLM that always returns a create_task tool call (never a text reply)."""
+        call_count = [0]
+
+        async def _fake_llm(messages, model="gpt-4o", tools=None, runtime=None):
+            call_count[0] += 1
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": f"tc_{call_count[0]:03d}",
+                    "type": "function",
+                    "function": {
+                        "name": "create_task",
+                        "arguments": json.dumps({"title": f"Proposed Task {call_count[0]}"}),
+                    },
+                }],
+                "_usage": {},
+            }
+
+        with patch("routers.agent._call_llm_message", side_effect=_fake_llm):
+            yield call_count
+
+    def test_planning_approval_no_duplicate_proposals(self, http_client, mock_llm_always_calls_tool):
+        """
+        In planning + require_approval mode, proposed_tool_calls must contain
+        exactly one entry per unique LLM tool-call batch, not N copies where N
+        is the number of loop iterations the model kept returning tool calls.
+        """
+        client, ctx = http_client
+        project = ctx["project"]
+        plan = ctx["plan"]
+        call_count = mock_llm_always_calls_tool
+
+        resp = client.post("/agent/chat", json={
+            "mode": "planning",
+            "project_id": project.id,
+            "plan_id": plan.id,
+            "messages": [{"role": "user", "content": "Create 1 task"}],
+            "require_approval": True,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+
+        proposed = data["proposed_tool_calls"]
+
+        # The loop must have stopped after the first batch of tool calls was
+        # collected, so there should be exactly 1 proposed action — not
+        # call_count[0] copies of it.
+        assert len(proposed) == 1, (
+            f"Expected exactly 1 proposed tool call but got {len(proposed)} "
+            f"(LLM was called {call_count[0]} time(s)). "
+            "The approval-mode loop likely did not break early."
+        )
+        assert proposed[0]["name"] == "create_task"
+
+    def test_planning_approval_llm_called_exactly_once_for_tool_batch(
+        self, http_client, mock_llm_always_calls_tool
+    ):
+        """The LLM should be called exactly once when approval mode breaks early."""
+        client, ctx = http_client
+        project = ctx["project"]
+        plan = ctx["plan"]
+        call_count = mock_llm_always_calls_tool
+
+        client.post("/agent/chat", json={
+            "mode": "planning",
+            "project_id": project.id,
+            "plan_id": plan.id,
+            "messages": [{"role": "user", "content": "Create a task"}],
+            "require_approval": True,
+        })
+
+        # With the fix: 1 call for tool call collection + 1 final "summarise"
+        # call (no-tool). Without the fix: up to 8 calls + 1 summarise = 9.
+        assert call_count[0] <= 2, (
+            f"LLM was called {call_count[0]} times; expected ≤ 2 in approval mode. "
+            "Approval-mode loop is not breaking early."
+        )
