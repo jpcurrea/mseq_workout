@@ -782,18 +782,24 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     final args = call['args'] is Map<String, dynamic>
         ? call['args'] as Map<String, dynamic>
         : <String, dynamic>{};
+    final resolvedTitle = (call['resolved_title'] ?? '').toString();
 
     switch (name) {
       case 'create_task':
-        return 'Create task: ${args['title'] ?? '(untitled)'}';
+        return 'Create task: "${args['title'] ?? '(untitled)'}"';
       case 'update_task':
-        return 'Update task #${args['task_id'] ?? '?'}';
+        final fields = args.keys.where((k) => k != 'task_id').join(', ');
+        return resolvedTitle.isNotEmpty
+            ? 'Update task: "$resolvedTitle"${fields.isNotEmpty ? ' ($fields)' : ''}'
+            : 'Update task #${args['task_id'] ?? '?'}${fields.isNotEmpty ? ' ($fields)' : ''}';
       case 'delete_task':
-        return 'Delete task #${args['task_id'] ?? '?'}';
+        return resolvedTitle.isNotEmpty
+            ? 'DELETE: "$resolvedTitle"'
+            : 'DELETE task #${args['task_id'] ?? '?'}';
       case 'write_plan':
         return 'Write plan content${args['append'] == true ? ' (append)' : ''}';
       case 'create_plan':
-        return 'Create plan: ${args['title'] ?? '(untitled)'}';
+        return 'Create plan: "${args['title'] ?? '(untitled)'}"';
       case 'insert_task_into_plan':
         return 'Embed task #${args['task_id'] ?? '?'} into plan';
       default:
@@ -802,6 +808,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
   }
 
   Future<bool?> _confirmApplyToolCalls(List<Map<String, dynamic>> calls) {
+    final hasDestructive = calls.any((c) => c['name'] == 'delete_task');
     return showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -812,17 +819,52 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (hasDestructive)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade50,
+                    border: Border.all(color: Colors.red.shade300),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.warning_amber_rounded, color: Colors.red.shade700, size: 18),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'This includes permanent task deletions. Review carefully.',
+                          style: TextStyle(color: Colors.red.shade800, fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               const Text('The agent proposed these actions:'),
               const SizedBox(height: 8),
               Flexible(
                 child: ListView.builder(
                   shrinkWrap: true,
                   itemCount: calls.length,
-                  itemBuilder: (_, i) => ListTile(
-                    dense: true,
-                    leading: const Icon(Icons.bolt, size: 16),
-                    title: Text(_describeProposedCall(calls[i])),
-                  ),
+                  itemBuilder: (_, i) {
+                    final call = calls[i];
+                    final isDelete = call['name'] == 'delete_task';
+                    return ListTile(
+                      dense: true,
+                      leading: Icon(
+                        isDelete ? Icons.delete_forever : Icons.bolt,
+                        size: 16,
+                        color: isDelete ? Colors.red : null,
+                      ),
+                      title: Text(
+                        _describeProposedCall(call),
+                        style: isDelete
+                            ? const TextStyle(color: Colors.red, fontWeight: FontWeight.bold)
+                            : null,
+                      ),
+                    );
+                  },
                 ),
               ),
             ],

@@ -541,6 +541,10 @@ ACTIONS & APPROVAL
 - To remove a task, call delete_task with the exact id from the project
   context. To clean up duplicates, delete the extras and keep one. Do not
   "recreate" tasks to fix mistakes — update or delete the existing ones.
+- CRITICAL: When a plan is open, you may ONLY call delete_task for tasks that
+  are already embedded in that plan via {{task:ID}} tokens. Never delete tasks
+  that are not referenced in the current plan — doing so will be rejected. If
+  a task is not in the plan, do not delete it; update or ignore it instead.
 - After you finish your tool calls, always reply to the user in plain text
   summarizing what you created, updated, or deleted.
 - To embed a task inside a plan document, the task must already exist (create
@@ -692,7 +696,7 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                         "duration_minutes": {"type": "integer"},
                         "parent_task_id": {"type": "integer"},
                         "is_recurring": {"type": "boolean"},
-                        "recurrence_rule": {"type": "string", "enum": ["DAILY", "WEEKLY", "MONTHLY"]},
+                        "recurrence_rule": {"type": "string", "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY"]},
                         "tags": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -717,7 +721,7 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                         "duration_minutes": {"type": "integer"},
                         "parent_task_id": {"type": "integer"},
                         "is_recurring": {"type": "boolean"},
-                        "recurrence_rule": {"type": "string", "enum": ["DAILY", "WEEKLY", "MONTHLY"]},
+                        "recurrence_rule": {"type": "string", "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY"]},
                         "is_completed": {"type": "boolean"},
                         "tags": {
                             "type": "array",
@@ -1017,6 +1021,28 @@ def _execute_planning_tool_call(
         task = session.query(Task).filter(Task.id == task_id, Task.project_id == project_id).first()
         if not task:
             raise HTTPException(status_code=404, detail="Task not found in this project")
+
+        # Safety guardrail: when operating within a plan, only allow deleting
+        # tasks that are explicitly embedded in that plan via {task:ID} tokens.
+        # This prevents the agent from accidentally deleting unrelated tasks.
+        if default_plan_id is not None:
+            plan = session.query(Plan).filter(
+                Plan.id == default_plan_id, Plan.project_id == project_id
+            ).first()
+            if plan:
+                plan_task_ids = {
+                    int(m.group(1))
+                    for m in _TASK_TOKEN_RE.finditer(plan.content or "")
+                }
+                if task_id not in plan_task_ids:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(
+                            f"Cannot delete task #{task_id} (\'{task.title}\') — it is not "
+                            "embedded in this plan. Only tasks referenced via {task:ID} "
+                            "tokens in the current plan may be deleted from the plan editor."
+                        ),
+                    )
 
         title = task.title
         if dry_run:
@@ -1341,12 +1367,6 @@ async def agent_chat(
                     if not isinstance(parsed_args, dict):
                         raise ValueError("Tool arguments must be a JSON object")
 
-                    if body.mode == "planning" and body.require_approval:
-                        # Read-only tools don't mutate data, so they execute
-                        # immediately and never go through the approval queue.
-                        if tool_name not in _READ_ONLY_TOOLS:
-                            proposed_tool_calls.append({"name": tool_name, "args": parsed_args})
-
                     result = _execute_planning_tool_call(
                         name=tool_name,
                         args=parsed_args,
@@ -1360,6 +1380,18 @@ async def agent_chat(
                             and tool_name not in _READ_ONLY_TOOLS
                         ),
                     )
+
+                    if body.mode == "planning" and body.require_approval:
+                        # Read-only tools don't mutate data, so they execute
+                        # immediately and never go through the approval queue.
+                        if tool_name not in _READ_ONLY_TOOLS:
+                            entry: Dict[str, Any] = {"name": tool_name, "args": parsed_args}
+                            # Include the resolved task title so the approval UI
+                            # can show names instead of raw IDs.
+                            if result.get("ok") and result.get("title"):
+                                entry["resolved_title"] = result["title"]
+                            proposed_tool_calls.append(entry)
+
                 except Exception as exc:
                     result = {"ok": False, "action": tool_name, "error": str(exc)}
 
