@@ -14,6 +14,44 @@ import '../widgets/task_card.dart';
 import '../widgets/ai_settings_dialog.dart';
 import 'task_form_screen.dart';
 
+/// Shows a persistent error dialog with a Copy button.
+void _showError(BuildContext context, String message) {
+  showDialog<void>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Row(
+        children: [
+          Icon(Icons.error_outline, color: Colors.red.shade700),
+          const SizedBox(width: 8),
+          const Text('Error'),
+        ],
+      ),
+      content: SingleChildScrollView(
+        child: SelectableText(
+          message,
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          icon: const Icon(Icons.copy, size: 16),
+          label: const Text('Copy'),
+          onPressed: () {
+            Clipboard.setData(ClipboardData(text: message));
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Error copied'), duration: Duration(seconds: 1)),
+            );
+          },
+        ),
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+}
+
 class TaskPlansScreen extends StatefulWidget {
   const TaskPlansScreen({super.key});
 
@@ -76,7 +114,7 @@ class _TaskPlansScreenState extends State<TaskPlansScreen> {
         _load();
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showError(context, e.toString());
     }
   }
 
@@ -100,7 +138,7 @@ class _TaskPlansScreenState extends State<TaskPlansScreen> {
       await TaskApiService.deletePlan(plan.id);
       _load();
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showError(context, e.toString());
     }
   }
 
@@ -130,7 +168,7 @@ class _TaskPlansScreenState extends State<TaskPlansScreen> {
       await TaskApiService.updatePlan(plan.id, title: newTitle);
       _load();
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showError(context, e.toString());
     }
   }
 
@@ -296,7 +334,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       await _restoreConversation();
     } catch (e) {
       setState(() => _isLoading = false);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showError(context, e.toString());
     }
   }
 
@@ -353,7 +391,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       }
     } catch (e) {
       setState(() => _isSaving = false);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showError(context, e.toString());
     }
   }
 
@@ -362,7 +400,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     try {
       revisions = await TaskApiService.getPlanHistory(widget.planId);
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showError(context, e.toString());
       return;
     }
     if (!mounted) return;
@@ -542,7 +580,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       await TaskApiService.toggleComplete(task.id, note: note?.isEmpty == true ? null : note);
       await _load();
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showError(context, e.toString());
     }
   }
 
@@ -564,7 +602,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       await TaskApiService.startSession(task.id);
       setState(() => _activeSessions.add(task.id));
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showError(context, e.toString());
     }
   }
 
@@ -574,7 +612,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       setState(() => _activeSessions.remove(task.id));
       await _load();
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) _showError(context, e.toString());
     }
   }
 
@@ -695,10 +733,16 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     _scrollChatToBottom();
 
     try {
-      final payloadMessages = _chatEntries
+      // Only send the most recent 20 turns — the backend stores older history
+      // as a compressed summary, so replaying the full log bloats the request.
+      const _maxSendMessages = 20;
+      final allMessages = _chatEntries
           .where((m) => m.role == 'user' || m.role == 'assistant')
           .map((m) => {'role': m.role, 'content': m.content})
           .toList();
+      final payloadMessages = allMessages.length > _maxSendMessages
+          ? allMessages.sublist(allMessages.length - _maxSendMessages)
+          : allMessages;
 
       final res = await AgentApiService.planningChat(
         projectId: _plan!.projectId,
@@ -768,7 +812,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+        _showError(context, e.toString());
       }
     } finally {
       if (mounted) {
