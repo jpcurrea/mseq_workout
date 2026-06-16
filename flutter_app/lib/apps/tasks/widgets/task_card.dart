@@ -73,7 +73,7 @@ class _TaskCardState extends State<TaskCard> {
     setState(() => _historyLoading = true);
     TaskApiService.getCompletions(projectId: task.projectId!, taskId: task.id)
         .then((rows) {
-          if (mounted) setState(() { _completions = rows; _historyLoading = false; });
+          if (mounted) setState(() { _completions = rows as List<Map<String, dynamic>>; _historyLoading = false; });
         })
         .catchError((_) {
           if (mounted) setState(() { _completions = []; _historyLoading = false; });

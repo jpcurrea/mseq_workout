@@ -324,18 +324,12 @@ class TaskApiService {
     if (r.statusCode == 200) return List<Map<String, dynamic>>.from(json.decode(r.body));
     throw _err(r, 'Failed to load completions');
   }
-    final uri = Uri.parse('$_baseUrl/tasks/completions')
-        .replace(queryParameters: {'project_id': projectId.toString()});
-    final r = await http.get(uri, headers: await _headers());
-    if (r.statusCode == 200) return List<Map<String, dynamic>>.from(json.decode(r.body));
-    throw _err(r, 'Failed to load completion history');
-  }
 
   /// Returns the raw CSV text of the project's completion record.
   static Future<String> exportCompletionsCsv({required int projectId}) async {
     final uri = Uri.parse('$_baseUrl/tasks/completions/export')
         .replace(queryParameters: {'project_id': projectId.toString()});
-    final r = await http.get(uri, headers: await _authHeaders());
+    final r = await http.get(uri, headers: await _headers());
     if (r.statusCode == 200) return r.body;
     throw _err(r, 'Failed to export completion history');
   }
