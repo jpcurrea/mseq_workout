@@ -8,7 +8,9 @@ import '../models/task.dart';
 import '../models/project.dart';
 import '../services/task_api_service.dart';
 import '../services/project_api_service.dart';
+import '../services/agent_api_service.dart';
 import '../widgets/task_card.dart';
+import '../widgets/agent_chat_panel.dart';
 import 'task_form_screen.dart';
 
 /// How the top-level task list is ordered in the todo view.
@@ -52,6 +54,14 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   bool _selectionMode = false;
   final Set<int> _selectedTaskIds = {};
 
+  // ── Agent (todo mode) state ─────────────────────────────────────────────────
+  bool _agentExpanded = false;
+  bool _agentLoading = false;
+  bool _agentHasMemory = false;
+  final List<AgentChatEntry> _agentEntries = [];
+  final ScrollController _agentScrollCtrl = ScrollController();
+  final List<Map<String, String>> _agentHistory = [];
+
   @override
   void initState() {
     super.initState();
@@ -71,6 +81,106 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
         orElse: () => TaskSortMode.timeLeft,
       );
     });
+  }
+
+  @override
+  void dispose() {
+    _agentScrollCtrl.dispose();
+    super.dispose();
+  }
+
+  // ── Agent helpers ───────────────────────────────────────────────────────────
+
+  void _agentScrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_agentScrollCtrl.hasClients) {
+        _agentScrollCtrl.animateTo(
+          _agentScrollCtrl.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> _loadAgentConversation() async {
+    if (_activeProject == null) return;
+    try {
+      final data = await AgentApiService.getConversation(
+        mode: 'todo',
+        projectId: _activeProject!.id,
+      );
+      final msgs = data['messages'] as List<Map<String, dynamic>>? ?? [];
+      setState(() {
+        _agentEntries.clear();
+        _agentHistory.clear();
+        for (final m in msgs) {
+          final role = m['role']?.toString() ?? 'user';
+          final content = m['content']?.toString() ?? '';
+          if (role == 'user' || role == 'assistant') {
+            _agentEntries.add(AgentChatEntry(role: role, content: content));
+            _agentHistory.add({'role': role, 'content': content});
+          }
+        }
+        _agentHasMemory = data['has_memory'] == true;
+      });
+      _agentScrollToBottom();
+    } catch (_) {
+      // silently fail — start fresh
+    }
+  }
+
+  Future<void> _clearAgentConversation() async {
+    if (_activeProject == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Clear conversation?'),
+        content: const Text('This will delete the saved chat history.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Clear')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await AgentApiService.clearConversation(mode: 'todo', projectId: _activeProject!.id);
+    setState(() {
+      _agentEntries.clear();
+      _agentHistory.clear();
+    });
+  }
+
+  Future<void> _sendAgentMessage(String text) async {
+    if (_activeProject == null || text.isEmpty) return;
+    setState(() {
+      _agentEntries.add(AgentChatEntry(role: 'user', content: text));
+      _agentHistory.add({'role': 'user', 'content': text});
+      _agentLoading = true;
+    });
+    _agentScrollToBottom();
+    try {
+      final resp = await AgentApiService.todoChat(
+        projectId: _activeProject!.id,
+        messages: List.from(_agentHistory),
+      );
+      setState(() {
+        _agentEntries.add(AgentChatEntry(role: 'assistant', content: resp.reply));
+        _agentHistory.add({'role': 'assistant', 'content': resp.reply});
+        _agentHasMemory = true; // server persists after first exchange
+        _agentLoading = false;
+      });
+      // If agent modified tasks, reload the list.
+      if (resp.actions.any((a) => a['ok'] == true)) {
+        await _loadTasks();
+      }
+    } catch (e) {
+      setState(() {
+        _agentEntries.add(AgentChatEntry(role: 'error', content: e.toString()));
+        _agentLoading = false;
+      });
+    }
+    _agentScrollToBottom();
   }
 
   Future<void> _loadProjectThenTasks() async {
@@ -1023,6 +1133,26 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
             onSortSelected: _setSortMode,
           ),
           Expanded(child: _buildBody()),
+          // ── AI Assistant panel ────────────────────────────────────────────
+          AgentChatPanel(
+            title: 'AI Assistant',
+            entries: _agentEntries,
+            isLoading: _agentLoading,
+            isExpanded: _agentExpanded,
+            scrollController: _agentScrollCtrl,
+            hasMemory: _agentHasMemory,
+            emptyStateHint: 'Ask me what to work on, to add tasks, or what\'s overdue.',
+            onClear: _clearAgentConversation,
+            onSend: _sendAgentMessage,
+            onToggleExpand: () {
+              final wasCollapsed = !_agentExpanded;
+              setState(() => _agentExpanded = !_agentExpanded);
+              if (wasCollapsed) {
+                if (_agentEntries.isEmpty) _loadAgentConversation();
+                else _agentScrollToBottom();
+              }
+            },
+          ),
         ],
       ),
       floatingActionButton: FloatingActionButton(

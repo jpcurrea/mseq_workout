@@ -341,7 +341,7 @@ class ChatAttachment(BaseModel):
 
 
 class AgentChatRequest(BaseModel):
-    mode: Literal["planning", "analytics"]
+    mode: Literal["planning", "analytics", "todo"]
     project_id: int
     messages: List[ChatMessage]
     plan_id: Optional[int] = None
@@ -397,7 +397,7 @@ def _build_project_context(
     plan_id: Optional[int],
     session: Session,
 ) -> Dict[str, object]:
-    if mode == "planning":
+    if mode in ("planning", "todo"):
         tasks = (
             session.query(Task)
             .filter(Task.project_id == project_id)
@@ -426,6 +426,21 @@ def _build_project_context(
                 .all()
             )
             other_plans = [{"id": p.id, "title": p.title} for p in siblings]
+
+        if mode == "todo":
+            # Todo mode: tasks only — no plan content needed.
+            now = datetime.datetime.utcnow()
+            incomplete = [t for t in tasks if not t.is_completed]
+            overdue = [t for t in incomplete if t.due_date and t.due_date < now]
+            return {
+                "mode": "todo",
+                "project_id": project_id,
+                "tasks": [_serialize_task_brief(t) for t in tasks],
+                "overdue_count": len(overdue),
+                "plan_titles": [{"id": p.id, "title": p.title} for p in
+                                session.query(Plan).filter(Plan.project_id == project_id)
+                                .order_by(Plan.updated_at.desc()).limit(20).all()],
+            }
 
         return {
             "mode": "planning",
@@ -494,6 +509,27 @@ def _build_project_context(
 
 
 def _build_system_prompt(mode: str, project_id: int) -> str:
+    if mode == "todo":
+        return f"""You are a task assistant embedded in the daily todo list for a personal task-management app.
+The current project_id is {project_id}.
+
+YOUR ROLE
+- Help the user manage, understand, and act on their tasks for today and the near future.
+- You can create, update, delete, and query tasks. You cannot write or read plan documents — use the todo screen tools only.
+- When the user asks what they should work on, prioritise by due date and urgency; mention duration so they can plan their time.
+- When the user asks to add something, call create_task immediately — don't ask for confirmation unless the request is genuinely ambiguous.
+
+TOOL GUIDELINES
+- Use list_tasks to answer questions ("what's due today?", "anything tagged work?") before replying.
+- For marking tasks done: call update_task with is_completed=true. For recurring tasks, tell the user to use the app's complete button so the recurrence advances correctly.
+- Keep changes minimal. Don't delete tasks unless explicitly asked.
+
+STYLE
+- Be brief and actionable. Bullet-point task lists when listing more than two items.
+- You will often be spoken aloud via text-to-speech, so keep responses conversational and avoid markdown tables or heavy formatting.
+- Contractions and a friendly tone are fine.
+"""
+
     return f"""You are the planning assistant for a personal task-management app.
 You help the user break goals into tasks, set realistic durations and due
 dates, and organize their plan. The current mode is '{mode}'.
@@ -1258,6 +1294,95 @@ def _execute_planning_tool_call(
     raise HTTPException(status_code=400, detail=f"Unsupported tool: {name}")
 
 
+def _todo_tools_schema() -> List[Dict[str, Any]]:
+    """Trimmed tool set for the todo-screen agent.
+
+    No plan read/write — it operates directly on tasks and conversation.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_tasks",
+                "description": (
+                    "List tasks in the current project with optional filters. "
+                    "Use this to answer questions about what's due, overdue, tagged, etc."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "include_completed": {"type": "boolean"},
+                        "tag": {"type": "string"},
+                        "search": {"type": "string"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_task",
+                "description": "Create a task in the current project.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "due_date": {"type": "string", "description": "ISO datetime"},
+                        "duration_minutes": {"type": "integer"},
+                        "parent_task_id": {"type": "integer"},
+                        "is_recurring": {"type": "boolean"},
+                        "recurrence_rule": {
+                            "type": "string",
+                            "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY"],
+                        },
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["title"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_task",
+                "description": "Update an existing task in the current project.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "integer"},
+                        "title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "due_date": {"type": "string"},
+                        "duration_minutes": {"type": "integer"},
+                        "is_recurring": {"type": "boolean"},
+                        "recurrence_rule": {
+                            "type": "string",
+                            "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY"],
+                        },
+                        "is_completed": {"type": "boolean"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["task_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_task",
+                "description": "Permanently delete a task by its id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"task_id": {"type": "integer"}},
+                    "required": ["task_id"],
+                },
+            },
+        },
+    ]
+
+
 # ── Persistent conversation memory ────────────────────────────────────────────
 # One resumable thread per (user, mode, plan/project). Older turns are folded
 # into a compact LLM-written summary so storage and per-request tokens stay
@@ -1374,6 +1499,8 @@ async def agent_chat(
             + (
                 " In planning mode, be agentic: when user asks to add/edit tasks or rewrite plan, use tool calls."
                 if body.mode == "planning"
+                else " In todo mode, be agentic: use tool calls immediately to create/update/query tasks. Keep replies short — they may be spoken aloud."
+                if body.mode == "todo"
                 else ""
             ),
         },
@@ -1396,7 +1523,11 @@ async def agent_chat(
         if attachment_parts:
             llm_messages.append({"role": "user", "content": attachment_parts})
 
-    tool_defs = _planning_tools_schema() if body.mode == "planning" else None
+    tool_defs = (
+        _planning_tools_schema() if body.mode == "planning"
+        else _todo_tools_schema() if body.mode == "todo"
+        else None
+    )
     executed_actions: List[Dict[str, Any]] = []
     proposed_tool_calls: List[Dict[str, Any]] = []
     reply: Optional[str] = None
@@ -1594,7 +1725,7 @@ async def agent_usage(
 
 @router.get("/conversation")
 async def get_conversation(
-    mode: Literal["planning", "analytics"],
+    mode: Literal["planning", "analytics", "todo"],
     project_id: int,
     plan_id: Optional[int] = None,
     user_id: int = Depends(get_current_user_id),
@@ -1620,6 +1751,23 @@ async def get_conversation(
         "has_memory": bool(convo.summary),
         "updated_at": convo.updated_at.isoformat() if convo.updated_at else None,
     }
+
+
+@router.delete("/conversation")
+async def delete_conversation(
+    mode: Literal["planning", "analytics", "todo"],
+    project_id: int,
+    plan_id: Optional[int] = None,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Delete the saved chat thread for a plan/project."""
+    _assert_project_member(project_id, user_id, session)
+    convo = _find_conversation(session, user_id, mode, plan_id, project_id)
+    if convo:
+        session.delete(convo)
+        session.commit()
+    return {"ok": True}
 
 
 class AgentSettingsUpdate(BaseModel):

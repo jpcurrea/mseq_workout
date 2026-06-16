@@ -79,6 +79,41 @@ class AgentApiService {
     throw _err(r, 'Failed to chat with planning agent');
   }
 
+  static Future<AgentChatResponse> todoChat({
+    required int projectId,
+    required List<Map<String, String>> messages,
+  }) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/agent/chat'),
+      headers: await _headers(),
+      body: json.encode({
+        'mode': 'todo',
+        'project_id': projectId,
+        'messages': messages,
+        'require_approval': false,
+      }),
+    );
+
+    if (r.statusCode == 200) {
+      return AgentChatResponse.fromJson(json.decode(r.body) as Map<String, dynamic>);
+    }
+    throw _err(r, 'Failed to chat with todo agent');
+  }
+
+  static Future<void> clearConversation({
+    required String mode,
+    required int projectId,
+    int? planId,
+  }) async {
+    final params = <String, String>{
+      'mode': mode,
+      'project_id': '$projectId',
+      if (planId != null) 'plan_id': '$planId',
+    };
+    final uri = Uri.parse('$_baseUrl/agent/conversation').replace(queryParameters: params);
+    await http.delete(uri, headers: await _headers());
+  }
+
   static Future<Map<String, dynamic>> getConversation({
     required String mode,
     required int projectId,
