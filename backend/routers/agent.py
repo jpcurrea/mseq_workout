@@ -1320,59 +1320,66 @@ async def agent_chat(
         tool_calls = ai_msg.get("tool_calls") if isinstance(ai_msg, dict) else None
 
         if tool_calls:
-            llm_messages.append(
-                {
-                    "role": "assistant",
-                    "content": ai_msg.get("content") or "",
-                    "tool_calls": tool_calls,
-                }
-            )
+            # OpenAI rejects messages with >128 tool_calls when they are
+            # replayed in the conversation. Process in chunks of 128 so
+            # parallel execution is preserved within each batch.
+            _TOOL_CALL_BATCH = 128
+            for batch_start in range(0, len(tool_calls), _TOOL_CALL_BATCH):
+                batch = tool_calls[batch_start : batch_start + _TOOL_CALL_BATCH]
 
-            for tool_call in tool_calls:
-                fn = tool_call.get("function", {})
-                tool_name = fn.get("name")
-                raw_args = fn.get("arguments") or "{}"
-                try:
-                    parsed_args = json.loads(raw_args)
-                    if not isinstance(parsed_args, dict):
-                        raise ValueError("Tool arguments must be a JSON object")
-
-                    result = _execute_planning_tool_call(
-                        name=tool_name,
-                        args=parsed_args,
-                        project_id=body.project_id,
-                        default_plan_id=body.plan_id,
-                        user_id=user_id,
-                        session=session,
-                        dry_run=(
-                            body.mode == "planning"
-                            and body.require_approval
-                            and tool_name not in _READ_ONLY_TOOLS
-                        ),
-                    )
-
-                    if body.mode == "planning" and body.require_approval:
-                        # Read-only tools don't mutate data, so they execute
-                        # immediately and never go through the approval queue.
-                        if tool_name not in _READ_ONLY_TOOLS:
-                            entry: Dict[str, Any] = {"name": tool_name, "args": parsed_args}
-                            # Include the resolved task title so the approval UI
-                            # can show names instead of raw IDs.
-                            if result.get("ok") and result.get("title"):
-                                entry["resolved_title"] = result["title"]
-                            proposed_tool_calls.append(entry)
-
-                except Exception as exc:
-                    result = {"ok": False, "action": tool_name, "error": str(exc)}
-
-                executed_actions.append(result)
                 llm_messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": tool_call.get("id"),
-                        "content": json.dumps(result, ensure_ascii=True),
+                        "role": "assistant",
+                        "content": ai_msg.get("content") or "",
+                        "tool_calls": batch,
                     }
                 )
+
+                for tool_call in batch:
+                    fn = tool_call.get("function", {})
+                    tool_name = fn.get("name")
+                    raw_args = fn.get("arguments") or "{}"
+                    try:
+                        parsed_args = json.loads(raw_args)
+                        if not isinstance(parsed_args, dict):
+                            raise ValueError("Tool arguments must be a JSON object")
+
+                        result = _execute_planning_tool_call(
+                            name=tool_name,
+                            args=parsed_args,
+                            project_id=body.project_id,
+                            default_plan_id=body.plan_id,
+                            user_id=user_id,
+                            session=session,
+                            dry_run=(
+                                body.mode == "planning"
+                                and body.require_approval
+                                and tool_name not in _READ_ONLY_TOOLS
+                            ),
+                        )
+
+                        if body.mode == "planning" and body.require_approval:
+                            # Read-only tools don't mutate data, so they execute
+                            # immediately and never go through the approval queue.
+                            if tool_name not in _READ_ONLY_TOOLS:
+                                entry: Dict[str, Any] = {"name": tool_name, "args": parsed_args}
+                                # Include the resolved task title so the approval UI
+                                # can show names instead of raw IDs.
+                                if result.get("ok") and result.get("title"):
+                                    entry["resolved_title"] = result["title"]
+                                proposed_tool_calls.append(entry)
+
+                    except Exception as exc:
+                        result = {"ok": False, "action": tool_name, "error": str(exc)}
+
+                    executed_actions.append(result)
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.get("id"),
+                            "content": json.dumps(result, ensure_ascii=True),
+                        }
+                    )
             continue
 
         reply = ai_msg.get("content") if isinstance(ai_msg, dict) else None
