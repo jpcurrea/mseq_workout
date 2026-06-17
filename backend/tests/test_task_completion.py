@@ -227,12 +227,14 @@ def test_http_skip_advances_recurring_task(http_client):
     task = ctx["task"]
     task.is_recurring = True
     task.recurrence_rule = "DAILY"
-    task.due_date = datetime.datetime(2026, 6, 16)
+    # An overdue daily occurrence (yesterday).
+    task.due_date = datetime.datetime.utcnow() - datetime.timedelta(days=1)
     db.commit()
     resp = client.post(f"/tasks/{task.id}/skip")
     assert resp.status_code == 200
     db.refresh(task)
-    assert task.due_date == datetime.datetime(2026, 6, 17)
+    # Default "now" advancement: skip missed occurrences to the next one after now.
+    assert task.due_date > datetime.datetime.utcnow()
     assert task.is_completed is False
 
 def test_http_skip_nonrecurring_marks_completed(http_client):

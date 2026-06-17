@@ -33,10 +33,12 @@ class Task {
   final DateTime? completedAt;
   final bool isRecurring;
   final String? recurrenceRule;
+  final String recurrenceAdvanceMode;  // "now" | "stop"
   final List<Tag> tags;
   final List<Task> subtasks;
   final double urgencyScore;      // 0=neutral, 1=overdue/max-urgency
   final double? actualDurationMinutes;
+  final DateTime? activeSessionStartedAt;  // non-null while a work session is running
   final int? parentTaskId;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -53,10 +55,12 @@ class Task {
     this.completedAt,
     required this.isRecurring,
     this.recurrenceRule,
+    this.recurrenceAdvanceMode = 'now',
     required this.tags,
     required this.subtasks,
     required this.urgencyScore,
     this.actualDurationMinutes,
+    this.activeSessionStartedAt,
     this.parentTaskId,
     required this.createdAt,
     required this.updatedAt,
@@ -74,20 +78,36 @@ class Task {
         completedAt: json['completed_at'] != null ? DateTime.parse(json['completed_at']) : null,
         isRecurring: json['is_recurring'] ?? false,
         recurrenceRule: json['recurrence_rule'],
+        recurrenceAdvanceMode: json['recurrence_advance_mode'] ?? 'now',
         tags: (json['tags'] as List? ?? []).map((t) => Tag.fromJson(t)).toList(),
         subtasks: (json['subtasks'] as List? ?? []).map((t) => Task.fromJson(t)).toList(),
         urgencyScore: (json['urgency_score'] as num?)?.toDouble() ?? 0.0,
         actualDurationMinutes: (json['actual_duration_minutes'] as num?)?.toDouble(),
+        activeSessionStartedAt: json['active_session_started_at'] != null
+            ? DateTime.parse(json['active_session_started_at'])
+            : null,
         parentTaskId: json['parent_task_id'],
         createdAt: DateTime.parse(json['created_at']),
         updatedAt: DateTime.parse(json['updated_at']),
       );
 
+  /// True while a work session is currently running for this task.
+  bool get isSessionActive => activeSessionStartedAt != null;
+
+  /// Actual minutes worked including time elapsed in the currently-active
+  /// session (the backend's [actualDurationMinutes] only counts ended sessions).
+  double get liveActualMinutes {
+    final base = actualDurationMinutes ?? 0.0;
+    if (activeSessionStartedAt == null) return base;
+    final elapsed = DateTime.now().difference(activeSessionStartedAt!).inSeconds / 60.0;
+    return base + (elapsed > 0 ? elapsed : 0.0);
+  }
+
   /// Progress fraction for the progress bar [0, 1] using actual vs estimated duration.
   double get progressFraction {
     if (durationMinutes == null || durationMinutes! <= 0) return 0.0;
-    if (actualDurationMinutes == null) return 0.0;
-    return (actualDurationMinutes! / durationMinutes!).clamp(0.0, 1.0);
+    if (actualDurationMinutes == null && activeSessionStartedAt == null) return 0.0;
+    return (liveActualMinutes / durationMinutes!).clamp(0.0, 1.0);
   }
 
   String get dueDateLabel {

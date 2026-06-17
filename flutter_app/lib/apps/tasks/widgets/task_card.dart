@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -33,6 +35,7 @@ class TaskCard extends StatefulWidget {
   final VoidCallback? onDelete;
   final VoidCallback? onStartSession;
   final VoidCallback? onStopSession;
+  final void Function(String mode, DateTime? startedAt)? onRestartSession;
 
   const TaskCard({
     super.key,
@@ -49,6 +52,7 @@ class TaskCard extends StatefulWidget {
     this.onDelete,
     this.onStartSession,
     this.onStopSession,
+    this.onRestartSession,
   });
 
   @override
@@ -64,6 +68,46 @@ class _TaskCardState extends State<TaskCard> {
   bool _historyExpanded = false;
   bool _historyLoading = false;
 
+  /// Ticks while a work session is active and the full card is visible so the
+  /// progress bar reflects elapsed time without needing a server round-trip.
+  Timer? _liveTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncLiveTimer();
+  }
+
+  @override
+  void didUpdateWidget(covariant TaskCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isSessionActive != widget.isSessionActive ||
+        oldWidget.isPreview != widget.isPreview) {
+      _syncLiveTimer();
+    }
+  }
+
+  @override
+  void dispose() {
+    _liveTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Start/stop the 10-second refresh timer depending on whether a live session
+  /// is running and the detailed (non-preview) card is shown.
+  void _syncLiveTimer() {
+    final showingFullCard = !widget.isPreview || _isCardExpanded;
+    final shouldRun = widget.isSessionActive && showingFullCard;
+    if (shouldRun && _liveTimer == null) {
+      _liveTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (!shouldRun && _liveTimer != null) {
+      _liveTimer!.cancel();
+      _liveTimer = null;
+    }
+  }
+
   Color get _urgencyColor => urgencyColor(widget.task.startBy, widget.task.durationMinutes);
 
   void _maybeLoadHistory() {
@@ -78,6 +122,86 @@ class _TaskCardState extends State<TaskCard> {
         .catchError((_) {
           if (mounted) setState(() { _completions = []; _historyLoading = false; });
         });
+  }
+
+  /// Force-refreshes the completion history from the server (used after an edit).
+  Future<void> _reloadHistory() async {
+    final task = widget.task;
+    if (task.projectId == null) return;
+    try {
+      final rows = await TaskApiService.getCompletions(
+          projectId: task.projectId!, taskId: task.id);
+      if (mounted) {
+        setState(() => _completions = rows);
+      }
+    } catch (_) {
+      // Keep the existing rows on a transient failure.
+    }
+  }
+
+  /// Blocking dialog offering the three restart modes. Calls [onRestartSession]
+  /// with the chosen mode (and a custom start time for the "custom" mode).
+  Future<void> _showRestartDialog(BuildContext context) async {
+    final cb = widget.onRestartSession;
+    if (cb == null) return;
+    final choice = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Restart timer'),
+        content: const Text(
+          'Choose how to restart timekeeping for this task. The session stays active.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'session'),
+            child: const Text('Restart session'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'task'),
+            child: const Text('Restart task'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'custom'),
+            child: const Text('Custom start time'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, null),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (choice == null) return;
+    if (choice == 'custom') {
+      final picked = await _pickCustomStart(context);
+      if (picked == null) return;
+      cb('custom', picked);
+    } else {
+      cb(choice, null);
+    }
+  }
+
+  /// Date + time picker for the "custom start time" restart mode. Returns null
+  /// if the user cancels at any step. Future times are not allowed.
+  Future<DateTime?> _pickCustomStart(BuildContext context) async {
+    final now = DateTime.now();
+    final start = widget.task.activeSessionStartedAt?.toLocal() ?? now;
+    final date = await showDatePicker(
+      context: context,
+      initialDate: start.isAfter(now) ? now : start,
+      firstDate: DateTime(now.year - 5),
+      lastDate: now,
+    );
+    if (date == null) return null;
+    if (!context.mounted) return null;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(start),
+    );
+    if (time == null) return null;
+    final result = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+    return result.isAfter(now) ? now : result;
   }
 
   @override
@@ -97,7 +221,7 @@ class _TaskCardState extends State<TaskCard> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: () => setState(() => _isCardExpanded = true),
+          onTap: () => setState(() { _isCardExpanded = true; _syncLiveTimer(); }),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -218,7 +342,7 @@ class _TaskCardState extends State<TaskCard> {
                           // Collapse back to preview (only shown when card was tapped open)
                           if (widget.isPreview)
                             GestureDetector(
-                              onTap: () => setState(() => _isCardExpanded = false),
+                              onTap: () => setState(() { _isCardExpanded = false; _syncLiveTimer(); }),
                               child: const Padding(
                                 padding: EdgeInsets.symmetric(horizontal: 4),
                                 child: Icon(Icons.expand_less, size: 18, color: Colors.grey),
@@ -304,7 +428,9 @@ class _TaskCardState extends State<TaskCard> {
                           child: _CompletionHistoryTable(
                             rows: _completions!,
                             expanded: _historyExpanded,
+                            timeUnit: widget.timeUnit,
                             onToggle: () => setState(() => _historyExpanded = !_historyExpanded),
+                            onEdited: _reloadHistory,
                           ),
                         ),
 
@@ -318,6 +444,9 @@ class _TaskCardState extends State<TaskCard> {
                                 isActive: widget.isSessionActive,
                                 onStart: widget.onStartSession,
                                 onStop: widget.onStopSession,
+                                onRestart: widget.onRestartSession == null
+                                    ? null
+                                    : () => _showRestartDialog(context),
                               ),
                             const Spacer(),
                             if (task.subtasks.isNotEmpty && widget.onToggleExpand != null)
@@ -374,20 +503,48 @@ class _TaskCardState extends State<TaskCard> {
 class _CompletionHistoryTable extends StatelessWidget {
   final List<Map<String, dynamic>> rows;
   final bool expanded;
+  final String timeUnit;
   final VoidCallback onToggle;
+
+  /// Called after a completion's work sessions have been edited so the parent
+  /// can reload the history from the server.
+  final Future<void> Function()? onEdited;
 
   const _CompletionHistoryTable({
     required this.rows,
     required this.expanded,
     required this.onToggle,
+    this.timeUnit = 'hours',
+    this.onEdited,
   });
 
-  static final _dateFmt = DateFormat('MMM d, y');
+  static final _dateFmt = DateFormat('MM-dd-yy');
 
   String _fmtDate(String? iso) {
     if (iso == null) return '—';
     final dt = DateTime.tryParse(iso);
     return dt == null ? iso : _dateFmt.format(dt.toLocal());
+  }
+
+  String _fmtDuration(Object? minutes) {
+    if (minutes is! num) return '—';
+    return formatTaskDuration(minutes.round(), timeUnit);
+  }
+
+  /// Opens the work-session editor for a single completion row.
+  Future<void> _editRow(BuildContext context, Map<String, dynamic> r) async {
+    final completionId = r['id'] as int?;
+    if (completionId == null) return;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => _EditCompletionSessionsDialog(
+        completion: r,
+        timeUnit: timeUnit,
+      ),
+    );
+    if (saved == true && onEdited != null) {
+      await onEdited!();
+    }
   }
 
   @override
@@ -410,6 +567,13 @@ class _CompletionHistoryTable extends StatelessWidget {
                 'History (${rows.length})',
                 style: TextStyle(fontSize: 12, color: Colors.grey[600], fontWeight: FontWeight.w500),
               ),
+              if (expanded) ...[
+                const SizedBox(width: 6),
+                Text(
+                  '· tap a row to edit times',
+                  style: TextStyle(fontSize: 10, color: Colors.grey[500], fontStyle: FontStyle.italic),
+                ),
+              ],
             ],
           ),
         ),
@@ -419,7 +583,8 @@ class _CompletionHistoryTable extends StatelessWidget {
             columnWidths: const {
               0: IntrinsicColumnWidth(),   // status icon
               1: IntrinsicColumnWidth(),   // date
-              2: FlexColumnWidth(),        // note
+              2: IntrinsicColumnWidth(),   // duration
+              3: FlexColumnWidth(),        // note
             },
             defaultVerticalAlignment: TableCellVerticalAlignment.middle,
             children: [
@@ -438,6 +603,10 @@ class _CompletionHistoryTable extends StatelessWidget {
                     child: Text('Date', style: TextStyle(fontSize: 10, color: Colors.grey[500], fontWeight: FontWeight.w600)),
                   ),
                   Padding(
+                    padding: const EdgeInsets.only(bottom: 4, right: 12),
+                    child: Text('Duration', style: TextStyle(fontSize: 10, color: Colors.grey[500], fontWeight: FontWeight.w600)),
+                  ),
+                  Padding(
                     padding: const EdgeInsets.only(bottom: 4),
                     child: Text('Note', style: TextStyle(fontSize: 10, color: Colors.grey[500], fontWeight: FontWeight.w600)),
                   ),
@@ -447,29 +616,48 @@ class _CompletionHistoryTable extends StatelessWidget {
               for (final r in rows) ...[
                 TableRow(
                   children: [
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
-                      child: _statusIcon(r['status'] as String?),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 3),
-                      child: Text(
-                        _fmtDate(r['completed_at'] as String?),
-                        style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurface),
+                    TableRowInkWell(
+                      onTap: () => _editRow(context, r),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+                        child: _statusIcon(r['status'] as String?),
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 3),
-                      child: Text(
-                        (r['note'] as String?)?.trim().isNotEmpty == true
-                            ? r['note'] as String
-                            : '',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey[600],
-                          fontStyle: (r['note'] as String?)?.trim().isNotEmpty == true
-                              ? FontStyle.normal
-                              : FontStyle.italic,
+                    TableRowInkWell(
+                      onTap: () => _editRow(context, r),
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 3, bottom: 3, right: 24),
+                        child: Text(
+                          _fmtDate(r['completed_at'] as String?),
+                          style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurface),
+                        ),
+                      ),
+                    ),
+                    TableRowInkWell(
+                      onTap: () => _editRow(context, r),
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 3, bottom: 3, right: 12),
+                        child: Text(
+                          _fmtDuration(r['actual_minutes']),
+                          style: TextStyle(fontSize: 11, color: Colors.grey[700]),
+                        ),
+                      ),
+                    ),
+                    TableRowInkWell(
+                      onTap: () => _editRow(context, r),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        child: Text(
+                          (r['note'] as String?)?.trim().isNotEmpty == true
+                              ? r['note'] as String
+                              : '',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey[600],
+                            fontStyle: (r['note'] as String?)?.trim().isNotEmpty == true
+                                ? FontStyle.normal
+                                : FontStyle.italic,
+                          ),
                         ),
                       ),
                     ),
@@ -501,6 +689,319 @@ class _CompletionHistoryTable extends StatelessWidget {
           child: Icon(Icons.check_box_outline_blank, size: 14, color: Colors.grey[400]),
         );
     }
+  }
+}
+
+/// One editable work-session interval inside the completion editor.
+class _SessionDraft {
+  DateTime start;
+  DateTime end;
+  String? notes;
+  _SessionDraft({required this.start, required this.end, this.notes});
+
+  int get durationMinutes {
+    final d = end.difference(start).inSeconds;
+    return d <= 0 ? 0 : (d / 60).round();
+  }
+}
+
+/// Dialog that lets the user edit each recorded work-session interval of a past
+/// completion. Start/stop times are editable per interval; durations and the
+/// completion total are recomputed on save.
+class _EditCompletionSessionsDialog extends StatefulWidget {
+  final Map<String, dynamic> completion;
+  final String timeUnit;
+
+  const _EditCompletionSessionsDialog({
+    required this.completion,
+    this.timeUnit = 'hours',
+  });
+
+  @override
+  State<_EditCompletionSessionsDialog> createState() =>
+      _EditCompletionSessionsDialogState();
+}
+
+class _EditCompletionSessionsDialogState
+    extends State<_EditCompletionSessionsDialog> {
+  static final _fmt = DateFormat('MMM d, yyyy · h:mm a');
+
+  late List<_SessionDraft> _sessions;
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _sessions = _initialSessions();
+  }
+
+  List<_SessionDraft> _initialSessions() {
+    final raw = widget.completion['work_sessions'];
+    final result = <_SessionDraft>[];
+    if (raw is List) {
+      for (final item in raw) {
+        if (item is! Map) continue;
+        final start = DateTime.tryParse('${item['started_at']}')?.toLocal();
+        final end = DateTime.tryParse('${item['ended_at']}')?.toLocal();
+        if (start == null || end == null) continue;
+        result.add(_SessionDraft(
+          start: start,
+          end: end,
+          notes: item['notes'] as String?,
+        ));
+      }
+    }
+    if (result.isEmpty) {
+      // Legacy / single-shot completions: seed one interval from completed_at
+      // and the recorded total so the user has something to edit.
+      final end = DateTime.tryParse('${widget.completion['completed_at']}')
+              ?.toLocal() ??
+          DateTime.now();
+      final actual = widget.completion['actual_minutes'];
+      final minutes = (actual is num && actual > 0) ? actual.round() : 0;
+      result.add(_SessionDraft(
+        start: end.subtract(Duration(minutes: minutes)),
+        end: end,
+      ));
+    }
+    return result;
+  }
+
+  int get _totalMinutes =>
+      _sessions.fold(0, (sum, s) => sum + s.durationMinutes);
+
+  Future<DateTime?> _pickDateTime(DateTime initial) async {
+    final date = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2000),
+      lastDate: DateTime.now().add(const Duration(days: 1)),
+    );
+    if (date == null || !mounted) return null;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initial),
+    );
+    if (time == null) return null;
+    return DateTime(
+        date.year, date.month, date.day, time.hour, time.minute);
+  }
+
+  String? _validate() {
+    final now = DateTime.now().add(const Duration(minutes: 1));
+    for (var i = 0; i < _sessions.length; i++) {
+      final s = _sessions[i];
+      if (s.end.isBefore(s.start)) {
+        return 'Interval ${i + 1}: stop time is before the start time.';
+      }
+      if (s.start.isAfter(now) || s.end.isAfter(now)) {
+        return 'Interval ${i + 1}: times cannot be in the future.';
+      }
+    }
+    return null;
+  }
+
+  Future<void> _save() async {
+    final problem = _validate();
+    if (problem != null) {
+      setState(() => _error = problem);
+      return;
+    }
+    final completionId = widget.completion['id'] as int?;
+    if (completionId == null) {
+      setState(() => _error = 'Missing completion id.');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await TaskApiService.updateCompletionSessions(
+        completionId,
+        _sessions
+            .map((s) => {
+                  'started_at': s.start,
+                  'ended_at': s.end,
+                  if (s.notes != null) 'notes': s.notes,
+                })
+            .toList(),
+      );
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = 'Failed to save: $e';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit work sessions'),
+      content: SizedBox(
+        width: 360,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (var i = 0; i < _sessions.length; i++) ...[
+                _buildSessionTile(i),
+                const SizedBox(height: 8),
+              ],
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: _saving
+                      ? null
+                      : () {
+                          final last = _sessions.isNotEmpty
+                              ? _sessions.last.end
+                              : DateTime.now();
+                          setState(() {
+                            _sessions.add(_SessionDraft(start: last, end: last));
+                            _error = null;
+                          });
+                        },
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('Add interval'),
+                ),
+              ),
+              const Divider(),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text('Total',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  Text(formatTaskDuration(_totalMinutes, widget.timeUnit),
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                ],
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 8),
+                Text(_error!,
+                    style: TextStyle(color: Colors.red[700], fontSize: 12)),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _saving ? null : _save,
+          child: _saving
+              ? const SizedBox(
+                  height: 16,
+                  width: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('Save'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSessionTile(int index) {
+    final s = _sessions[index];
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.grey[300]!),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text('Interval ${index + 1}',
+                  style: const TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w600)),
+              const Spacer(),
+              Text(formatTaskDuration(s.durationMinutes, widget.timeUnit),
+                  style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+              if (_sessions.length > 1)
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 18,
+                  tooltip: 'Remove interval',
+                  onPressed: _saving
+                      ? null
+                      : () => setState(() {
+                            _sessions.removeAt(index);
+                            _error = null;
+                          }),
+                  icon: Icon(Icons.delete_outline, color: Colors.red[400]),
+                ),
+            ],
+          ),
+          _buildTimeRow(
+            label: 'Start',
+            value: s.start,
+            onPick: () async {
+              final picked = await _pickDateTime(s.start);
+              if (picked != null) {
+                setState(() {
+                  s.start = picked;
+                  _error = null;
+                });
+              }
+            },
+          ),
+          _buildTimeRow(
+            label: 'Stop',
+            value: s.end,
+            onPick: () async {
+              final picked = await _pickDateTime(s.end);
+              if (picked != null) {
+                setState(() {
+                  s.end = picked;
+                  _error = null;
+                });
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTimeRow({
+    required String label,
+    required DateTime value,
+    required VoidCallback onPick,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 44,
+            child: Text(label,
+                style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+          ),
+          Expanded(
+            child: OutlinedButton(
+              onPressed: _saving ? null : onPick,
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                alignment: Alignment.centerLeft,
+              ),
+              child: Text(_fmt.format(value),
+                  style: const TextStyle(fontSize: 12)),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -716,7 +1217,7 @@ class _ProgressBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final progress = task.progressFraction;
-    final actualMin = task.actualDurationMinutes?.toInt() ?? 0;
+    final actualMin = task.liveActualMinutes.round();
     final estMin = task.durationMinutes ?? 0;
 
     return Column(
@@ -733,7 +1234,8 @@ class _ProgressBar extends StatelessWidget {
         ),
         const SizedBox(height: 2),
         Text(
-          '${_fmt(actualMin)} / ${_fmt(estMin)}',
+          '${_fmt(actualMin)} / ${_fmt(estMin)}'
+          '${task.isSessionActive ? ' · running' : ''}',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[500]),
         ),
       ],
@@ -774,21 +1276,56 @@ class _SessionButton extends StatelessWidget {
   final bool isActive;
   final VoidCallback? onStart;
   final VoidCallback? onStop;
-  const _SessionButton({required this.isActive, this.onStart, this.onStop});
+  final VoidCallback? onRestart;
+  const _SessionButton({required this.isActive, this.onStart, this.onStop, this.onRestart});
 
   @override
   Widget build(BuildContext context) {
-    return OutlinedButton.icon(
-      onPressed: isActive ? onStop : onStart,
-      icon: Icon(isActive ? Icons.stop_circle_outlined : Icons.play_circle_outline, size: 16),
-      label: Text(isActive ? 'Stop' : 'Start', style: const TextStyle(fontSize: 12)),
-      style: OutlinedButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        minimumSize: Size.zero,
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        foregroundColor: isActive ? Colors.orange[700] : Colors.blueGrey[600],
-        side: BorderSide(color: isActive ? Colors.orange[400]! : Colors.blueGrey[300]!),
-      ),
+    if (!isActive) {
+      return OutlinedButton.icon(
+        onPressed: onStart,
+        icon: const Icon(Icons.play_circle_outline, size: 16),
+        label: const Text('Start', style: TextStyle(fontSize: 12)),
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          minimumSize: Size.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          foregroundColor: Colors.blueGrey[600],
+          side: BorderSide(color: Colors.blueGrey[300]!),
+        ),
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        OutlinedButton.icon(
+          onPressed: onStop,
+          icon: const Icon(Icons.stop_circle_outlined, size: 16),
+          label: const Text('Stop', style: TextStyle(fontSize: 12)),
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            foregroundColor: Colors.orange[700],
+            side: BorderSide(color: Colors.orange[400]!),
+          ),
+        ),
+        if (onRestart != null) ...[
+          const SizedBox(width: 6),
+          OutlinedButton.icon(
+            onPressed: onRestart,
+            icon: const Icon(Icons.restart_alt, size: 16),
+            label: const Text('Restart', style: TextStyle(fontSize: 12)),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              foregroundColor: Colors.blueGrey[600],
+              side: BorderSide(color: Colors.blueGrey[300]!),
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -804,6 +1341,7 @@ class TaskCardTree extends StatelessWidget {
   final void Function(Task)? onDelete;
   final void Function(Task)? onStartSession;
   final void Function(Task)? onStopSession;
+  final void Function(Task task, String mode, DateTime? startedAt)? onRestartSession;
   final int depth;
   final String timeUnit;
   final TaskViewMode viewMode;
@@ -830,6 +1368,7 @@ class TaskCardTree extends StatelessWidget {
     this.onDelete,
     this.onStartSession,
     this.onStopSession,
+    this.onRestartSession,
     this.depth = 0,
     this.timeUnit = 'hours',
     this.viewMode = TaskViewMode.topLevelPreview,
@@ -855,6 +1394,9 @@ class TaskCardTree extends StatelessWidget {
       onDelete: onDelete != null ? () => onDelete!(task) : null,
       onStartSession: onStartSession != null ? () => onStartSession!(task) : null,
       onStopSession: onStopSession != null ? () => onStopSession!(task) : null,
+      onRestartSession: onRestartSession != null
+          ? (mode, startedAt) => onRestartSession!(task, mode, startedAt)
+          : null,
       buildSubtasks: (subtask) => TaskCardTree(
         task: subtask,
         activeSessions: activeSessions,
@@ -864,6 +1406,7 @@ class TaskCardTree extends StatelessWidget {
         onDelete: onDelete,
         onStartSession: onStartSession,
         onStopSession: onStopSession,
+        onRestartSession: onRestartSession,
         depth: depth + 1,
         timeUnit: timeUnit,
         viewMode: viewMode,
@@ -890,6 +1433,7 @@ class _ExpandableTaskCard extends StatefulWidget {
   final VoidCallback? onDelete;
   final VoidCallback? onStartSession;
   final VoidCallback? onStopSession;
+  final void Function(String mode, DateTime? startedAt)? onRestartSession;
   final Widget Function(Task) buildSubtasks;
 
   const _ExpandableTaskCard({
@@ -908,6 +1452,7 @@ class _ExpandableTaskCard extends StatefulWidget {
     this.onDelete,
     this.onStartSession,
     this.onStopSession,
+    this.onRestartSession,
   });
 
   @override
@@ -981,6 +1526,7 @@ class _ExpandableTaskCardState extends State<_ExpandableTaskCard> {
           onDelete: widget.onDelete,
           onStartSession: widget.onStartSession,
           onStopSession: widget.onStopSession,
+          onRestartSession: widget.onRestartSession,
         ),
         if (_showSubtasks)
           Column(

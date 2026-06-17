@@ -241,21 +241,43 @@ class TaskApiService {
     throw _err(r, 'Failed to batch-$status tasks');
   }
 
-  static Future<Task> toggleComplete(int id, {String? note}) async {
+  static Future<Task> toggleComplete(
+    int id, {
+    String? note,
+    DateTime? startedAt,
+    DateTime? endedAt,
+    String? recurrenceAdvanceMode,
+  }) async {
     final r = await http.post(
       Uri.parse('$_baseUrl/tasks/$id/complete'),
       headers: await _headers(),
-      body: json.encode({if (note != null && note.isNotEmpty) 'note': note}),
+      body: json.encode({
+        if (note != null && note.isNotEmpty) 'note': note,
+        if (startedAt != null) 'started_at': startedAt.toUtc().toIso8601String(),
+        if (endedAt != null) 'ended_at': endedAt.toUtc().toIso8601String(),
+        if (recurrenceAdvanceMode != null) 'recurrence_advance_mode': recurrenceAdvanceMode,
+      }),
     );
     if (r.statusCode == 200) return Task.fromJson(json.decode(r.body));
     throw _err(r, 'Failed to toggle complete');
   }
 
-  static Future<Task> skipTask(int id, {String? note}) async {
+  static Future<Task> skipTask(
+    int id, {
+    String? note,
+    DateTime? startedAt,
+    DateTime? endedAt,
+    String? recurrenceAdvanceMode,
+  }) async {
     final r = await http.post(
       Uri.parse('$_baseUrl/tasks/$id/skip'),
       headers: await _headers(),
-      body: json.encode({if (note != null && note.isNotEmpty) 'note': note}),
+      body: json.encode({
+        if (note != null && note.isNotEmpty) 'note': note,
+        if (startedAt != null) 'started_at': startedAt.toUtc().toIso8601String(),
+        if (endedAt != null) 'ended_at': endedAt.toUtc().toIso8601String(),
+        if (recurrenceAdvanceMode != null) 'recurrence_advance_mode': recurrenceAdvanceMode,
+      }),
     );
     if (r.statusCode == 200) return Task.fromJson(json.decode(r.body));
     throw _err(r, 'Failed to skip task');
@@ -265,6 +287,26 @@ class TaskApiService {
     final r = await http.post(Uri.parse('$_baseUrl/tasks/$taskId/start'), headers: await _headers());
     if (r.statusCode != 200) throw _err(r, 'Failed to start session');
   }
+
+  /// Restart timekeeping for a task while keeping a session active.
+  /// [mode] is "session" (reset start to now), "task" (wipe history, start now),
+  /// or "custom" (set start to [startedAt]).
+  static Future<void> restartSession(
+    int taskId, {
+    required String mode,
+    DateTime? startedAt,
+  }) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/tasks/$taskId/session/restart'),
+      headers: await _headers(),
+      body: json.encode({
+        'mode': mode,
+        if (startedAt != null) 'started_at': startedAt.toUtc().toIso8601String(),
+      }),
+    );
+    if (r.statusCode != 200) throw _err(r, 'Failed to restart session');
+  }
+
 
   static Future<Map<String, dynamic>> stopSession(int taskId, {String? notes}) async {
     final r = await http.post(
@@ -400,6 +442,32 @@ class TaskApiService {
     if (r.statusCode == 200) return List<Map<String, dynamic>>.from(json.decode(r.body));
     throw _err(r, 'Failed to load completions');
   }
+
+  /// Replaces the recorded work-session intervals of a past completion.
+  ///
+  /// Each entry in [sessions] must contain `started_at` and `ended_at` as
+  /// `DateTime` objects (sent as UTC ISO-8601) and may include `notes`.
+  /// Returns the updated completion record.
+  static Future<Map<String, dynamic>> updateCompletionSessions(
+      int completionId, List<Map<String, dynamic>> sessions) async {
+    final uri = Uri.parse('$_baseUrl/tasks/completions/$completionId/sessions');
+    final payload = {
+      'sessions': sessions.map((s) {
+        final start = s['started_at'] as DateTime;
+        final end = s['ended_at'] as DateTime;
+        return {
+          'started_at': start.toUtc().toIso8601String(),
+          'ended_at': end.toUtc().toIso8601String(),
+          if (s['notes'] != null) 'notes': s['notes'],
+        };
+      }).toList(),
+    };
+    final r = await http.patch(uri,
+        headers: await _headers(), body: json.encode(payload));
+    if (r.statusCode == 200) return json.decode(r.body) as Map<String, dynamic>;
+    throw _err(r, 'Failed to update work sessions');
+  }
+
 
   /// Returns the raw CSV text of the project's completion record.
   static Future<String> exportCompletionsCsv({required int projectId}) async {

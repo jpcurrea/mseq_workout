@@ -101,6 +101,11 @@ def _actual_duration_minutes(task: Task) -> Optional[float]:
     )
 
 
+def _active_session(task: Task) -> Optional["WorkSession"]:
+    """Return the task's currently-active work session (ended_at is None), if any."""
+    return next((s for s in task.work_sessions if s.ended_at is None), None)
+
+
 def _serialize_task(task: Task, now: datetime.datetime) -> Dict[str, Any]:
     """Recursively serialize a Task (loads subtasks via relationship)."""
     return {
@@ -115,10 +120,15 @@ def _serialize_task(task: Task, now: datetime.datetime) -> Dict[str, Any]:
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         "is_recurring": task.is_recurring,
         "recurrence_rule": task.recurrence_rule,
+        "recurrence_advance_mode": task.recurrence_advance_mode or "now",
         "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in task.tags],
         "subtasks": [_serialize_task(st, now) for st in task.subtasks],
         "urgency_score": _tree_urgency(task, now),
         "actual_duration_minutes": _actual_duration_minutes(task),
+        "active_session_started_at": (
+            _active_session(task).started_at.isoformat()
+            if _active_session(task) else None
+        ),
         "parent_task_id": task.parent_task_id,
         "created_at": task.created_at.isoformat(),
         "updated_at": task.updated_at.isoformat() if task.updated_at else task.created_at.isoformat(),
@@ -158,6 +168,30 @@ def _next_due_date(due_date: datetime.datetime, rule: str) -> datetime.datetime:
             month, year = 1, year + 1
         return due_date.replace(year=year, month=month)
     return due_date + datetime.timedelta(days=1)
+
+
+def _advance_due_date(
+    due_date: datetime.datetime, rule: str, target: datetime.datetime
+) -> datetime.datetime:
+    """Advance ``due_date`` by whole recurrence intervals until it lands strictly
+    after ``target``.  Always advances at least once (completing an occurrence
+    must move the deadline forward), then skips over any iterations that fall on
+    or before ``target``.  A guard caps the loop to avoid runaway iteration."""
+    nxt = _next_due_date(due_date, rule)
+    guard = 0
+    while nxt <= target and guard < 100000:
+        nxt = _next_due_date(nxt, rule)
+        guard += 1
+    return nxt
+
+
+def _to_naive_utc(dt: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
+    """Normalize an optional datetime to naive UTC (matching stored values)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _norm_col(name: str) -> str:
@@ -314,6 +348,11 @@ class TagUpdate(BaseModel):
 
 class SessionStop(BaseModel):
     notes: Optional[str] = None
+
+
+class SessionRestart(BaseModel):
+    mode: str = "session"   # "session" | "task" | "custom"
+    started_at: Optional[datetime.datetime] = None
 
 
 # ── Task endpoints ─────────────────────────────────────────────────────────────
@@ -659,6 +698,90 @@ async def export_completions(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _serialize_completion(c: TaskCompletion) -> Dict[str, Any]:
+    return {
+        "id": c.id,
+        "task_id": c.task_id,
+        "title": c.title,
+        "tags": c.tags,
+        "status": c.status or "completed",
+        "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+        "due_date": c.due_date.isoformat() if c.due_date else None,
+        "estimated_minutes": c.duration_minutes,
+        "actual_minutes": c.actual_minutes,
+        "lateness_minutes": _completion_lateness_minutes(c),
+        "note": c.note,
+        "work_sessions": json.loads(c.work_sessions_json) if c.work_sessions_json else [],
+    }
+
+
+class CompletionSessionEdit(BaseModel):
+    started_at: datetime.datetime
+    ended_at: datetime.datetime
+    notes: Optional[str] = None
+
+
+class CompletionSessionsUpdate(BaseModel):
+    sessions: List[CompletionSessionEdit]
+
+
+@tasks_router.patch("/completions/{completion_id}/sessions")
+async def update_completion_sessions(
+    completion_id: int,
+    body: CompletionSessionsUpdate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Edit the recorded work-session intervals of a past completion.
+
+    Each interval's start/stop is revalidated, per-session durations and the
+    completion's total ``actual_minutes`` are recomputed, and ``completed_at``
+    is set to the latest stop time. Intervals are stored separately, mirroring
+    how live work sessions are tracked on the task."""
+    c = (
+        session.query(TaskCompletion)
+        .filter(TaskCompletion.id == completion_id)
+        .first()
+    )
+    if c is None:
+        raise HTTPException(status_code=404, detail="Completion not found")
+    _assert_can_write(c.project_id, user_id, session)
+
+    now = datetime.datetime.utcnow()
+    skew = datetime.timedelta(minutes=1)
+    normalized: List[Dict[str, Any]] = []
+    total = 0.0
+    for s in body.sessions:
+        started = _to_naive_utc(s.started_at)
+        ended = _to_naive_utc(s.ended_at)
+        if ended < started:
+            raise HTTPException(status_code=422, detail="ended_at cannot be before started_at")
+        if started > now + skew or ended > now + skew:
+            raise HTTPException(status_code=422, detail="times cannot be in the future")
+        duration = round((ended - started).total_seconds() / 60.0, 2)
+        total += duration
+        normalized.append({
+            "started_at": started.isoformat(),
+            "ended_at": ended.isoformat(),
+            "duration_minutes": duration,
+            "notes": s.notes or None,
+        })
+
+    if normalized:
+        c.work_sessions_json = json.dumps(normalized)
+        c.actual_minutes = round(total, 2)
+        # The completion timestamp follows the latest stop time.
+        c.completed_at = max(
+            _to_naive_utc(s.ended_at) for s in body.sessions
+        )
+    else:
+        c.work_sessions_json = None
+        c.actual_minutes = None
+
+    session.commit()
+    return _serialize_completion(c)
 
 
 # ── Tag endpoints (MUST be before /{id}) ──────────────────────────────────────
@@ -1130,20 +1253,55 @@ def _mark_task_done(
     now: datetime.datetime,
     status: str,
     note: Optional[str] = None,
+    started_at: Optional[datetime.datetime] = None,
+    ended_at: Optional[datetime.datetime] = None,
+    advance_mode: Optional[str] = None,
 ):
     """Close the task (completed or skipped) and record an immutable history row.
 
+    ``started_at`` / ``ended_at`` optionally override the work interval recorded
+    for this completion (used by the completion dialog so the user can log a task
+    as having been finished at some point in the past).  When supplied they
+    adjust the active work session, or create a synthetic one if none was running.
+    ``ended_at`` (when given) also becomes the effective completion timestamp.
+
     For recurring tasks the same task object is reset in-place with the next
-    due date so only one Task row ever exists per recurring item.  The work
-    sessions from the just-finished occurrence are deleted after their total
-    duration has been captured in the TaskCompletion row.
+    due date so only one Task row ever exists per recurring item.  ``advance_mode``
+    controls how the deadline advances: "now" (default) jumps to the first
+    iteration after the current moment, skipping missed ones; "stop" jumps to the
+    first iteration after the selected stop time.  The chosen mode is persisted on
+    the task.  The work sessions from the just-finished occurrence are deleted
+    after their total duration has been captured in the TaskCompletion row.
 
     For non-recurring tasks the task is simply marked completed.
     """
-    # Close any active work session first so its duration is counted.
+    started_at = _to_naive_utc(started_at)
+    ended_at = _to_naive_utc(ended_at)
+
+    # The effective completion timestamp: the user-selected stop time if given,
+    # otherwise the current moment.
+    completion_time = ended_at or now
+
+    # Reconcile the work interval for this completion.
     active = next((s for s in task.work_sessions if s.ended_at is None), None)
     if active:
-        active.ended_at = now
+        if started_at is not None:
+            active.started_at = started_at
+        active.ended_at = ended_at or now
+    elif started_at is not None or ended_at is not None:
+        # No session was running but the user supplied explicit times — record a
+        # synthetic session so the actual duration reflects the logged interval.
+        ws_start = started_at or ended_at or now
+        ws_end = ended_at or now
+        if ws_end > ws_start:
+            new_ws = WorkSession(
+                task_id=task.id,
+                user_id=user_id,
+                started_at=ws_start,
+                ended_at=ws_end,
+            )
+            session.add(new_ws)
+            task.work_sessions.append(new_ws)
 
     # Capture actual duration before we potentially delete sessions.
     actual = _actual_duration_minutes(task)
@@ -1169,7 +1327,7 @@ def _mark_task_done(
         user_id=user_id,
         project_id=task.project_id,
         title=task.title,
-        completed_at=now,
+        completed_at=completion_time,
         due_date=task.due_date,
         duration_minutes=task.duration_minutes,
         actual_minutes=actual,
@@ -1180,9 +1338,18 @@ def _mark_task_done(
     ))
 
     if task.is_recurring and task.recurrence_rule and task.due_date:
-        # Reset the task in-place: advance the deadline by one interval and
-        # clear completion state so it reappears in the todo list.
-        task.due_date = _next_due_date(task.due_date, task.recurrence_rule)
+        # Persist the chosen advancement mode (default "now") so future
+        # completions remember the user's preference.
+        mode = advance_mode or task.recurrence_advance_mode or "now"
+        if mode not in ("now", "stop"):
+            mode = "now"
+        task.recurrence_advance_mode = mode
+        # "now": skip every missed iteration up to the present moment.
+        # "stop": advance to the first iteration after the selected stop time.
+        target = now if mode == "now" else completion_time
+        # Reset the task in-place: advance the deadline and clear completion
+        # state so it reappears in the todo list.
+        task.due_date = _advance_due_date(task.due_date, task.recurrence_rule, target)
         task.is_completed = False
         task.completed_at = None
         # Delete work sessions from the finished occurrence — their total is
@@ -1191,11 +1358,31 @@ def _mark_task_done(
             session.delete(ws)
     else:
         task.is_completed = True
-        task.completed_at = now
+        task.completed_at = completion_time
 
 
 class CompleteBody(BaseModel):
     note: Optional[str] = None
+    started_at: Optional[datetime.datetime] = None
+    ended_at: Optional[datetime.datetime] = None
+    recurrence_advance_mode: Optional[str] = None  # "now" | "stop"
+
+
+def _validate_completion_times(
+    started_at: Optional[datetime.datetime],
+    ended_at: Optional[datetime.datetime],
+    now: datetime.datetime,
+) -> None:
+    started = _to_naive_utc(started_at)
+    ended = _to_naive_utc(ended_at)
+    # Allow a small clock-skew tolerance for "now" submitted by clients.
+    skew = datetime.timedelta(minutes=1)
+    if started is not None and started > now + skew:
+        raise HTTPException(status_code=422, detail="started_at cannot be in the future")
+    if ended is not None and ended > now + skew:
+        raise HTTPException(status_code=422, detail="ended_at cannot be in the future")
+    if started is not None and ended is not None and ended < started:
+        raise HTTPException(status_code=422, detail="ended_at cannot be before started_at")
 
 
 @tasks_router.post("/{task_id}/complete")
@@ -1213,7 +1400,15 @@ async def toggle_complete(
         task.is_completed = False
         task.completed_at = None
     else:
-        _mark_task_done(task, user_id, session, now, status="completed", note=body.note)
+        _validate_completion_times(body.started_at, body.ended_at, now)
+        _mark_task_done(
+            task, user_id, session, now,
+            status="completed",
+            note=body.note,
+            started_at=body.started_at,
+            ended_at=body.ended_at,
+            advance_mode=body.recurrence_advance_mode,
+        )
 
     task.updated_at = now
     session.commit()
@@ -1231,7 +1426,15 @@ async def skip_task(
     recurring task to its next occurrence) but is recorded as 'skipped'."""
     task = _load_task(task_id, user_id, session)
     now = datetime.datetime.utcnow()
-    _mark_task_done(task, user_id, session, now, status="skipped", note=body.note)
+    _validate_completion_times(body.started_at, body.ended_at, now)
+    _mark_task_done(
+        task, user_id, session, now,
+        status="skipped",
+        note=body.note,
+        started_at=body.started_at,
+        ended_at=body.ended_at,
+        advance_mode=body.recurrence_advance_mode,
+    )
     task.updated_at = now
     session.commit()
     return _serialize_task(task, now)
@@ -1244,14 +1447,74 @@ async def start_session(
     session: Session = Depends(get_session),
 ):
     task = _load_task(task_id, user_id, session)
-    active = next((s for s in task.work_sessions if s.ended_at is None), None)
+    active = _active_session(task)
     if active:
-        raise HTTPException(status_code=409, detail="A work session is already active for this task")
+        # Idempotent: a session may already be active (e.g. started on another
+        # device). Adopt it rather than failing so every client converges.
+        return {
+            "message": "Work session already active",
+            "session_id": active.id,
+            "started_at": active.started_at.isoformat(),
+        }
 
     ws = WorkSession(task_id=task.id, user_id=user_id, started_at=datetime.datetime.utcnow())
     session.add(ws)
     session.commit()
     return {"message": "Work session started", "session_id": ws.id, "started_at": ws.started_at.isoformat()}
+
+
+@tasks_router.post("/{task_id}/session/restart")
+async def restart_session(
+    task_id: int,
+    body: SessionRestart = SessionRestart(),
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Restart timekeeping for a task while keeping a session active.
+
+    Modes:
+      - "session": move the active session's start to now (keep prior history).
+      - "task":    delete every work session and start fresh from now.
+      - "custom":  set the active session's start to a user-supplied time.
+    """
+    task = _load_task(task_id, user_id, session)
+    now = datetime.datetime.utcnow()
+    active = _active_session(task)
+
+    if body.mode == "task":
+        for ws in list(task.work_sessions):
+            session.delete(ws)
+        active = WorkSession(task_id=task.id, user_id=user_id, started_at=now)
+        session.add(active)
+    elif body.mode == "custom":
+        if body.started_at is None:
+            raise HTTPException(status_code=422, detail="started_at is required for custom mode")
+        started = body.started_at
+        if started.tzinfo is not None:
+            started = started.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        if started > now:
+            raise HTTPException(status_code=422, detail="started_at cannot be in the future")
+        if active is None:
+            active = WorkSession(task_id=task.id, user_id=user_id, started_at=started)
+            session.add(active)
+        else:
+            active.started_at = started
+    elif body.mode == "session":
+        if active is None:
+            active = WorkSession(task_id=task.id, user_id=user_id, started_at=now)
+            session.add(active)
+        else:
+            active.started_at = now
+    else:
+        raise HTTPException(status_code=422, detail=f"Unknown restart mode: {body.mode}")
+
+    session.commit()
+    return {
+        "message": "Work session restarted",
+        "session_id": active.id,
+        "started_at": active.started_at.isoformat(),
+    }
+
 
 
 @tasks_router.post("/{task_id}/stop")

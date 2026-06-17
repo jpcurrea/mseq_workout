@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/task.dart';
 import '../models/project.dart';
@@ -50,6 +51,10 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   bool _flatView = false;
   TaskSortMode _sortMode = TaskSortMode.timeLeft;
 
+  // ── Search state ────────────────────────────────────────────────────────────
+  final TextEditingController _searchCtrl = TextEditingController();
+  String _searchQuery = '';
+
   // ── Multi-select state ──────────────────────────────────────────────────────
   bool _selectionMode = false;
   final Set<int> _selectedTaskIds = {};
@@ -86,6 +91,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   @override
   void dispose() {
     _agentScrollCtrl.dispose();
+    _searchCtrl.dispose();
     super.dispose();
   }
 
@@ -220,6 +226,11 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
       setState(() {
         _tasks = results[0] as List<Task>;
         _tags = results[1] as List<Tag>;
+        // Derive active-session state from the backend so a session started on
+        // another device is reflected here too.
+        _activeSessions
+          ..clear()
+          ..addAll(_collectActiveSessionIds(_tasks));
         _isLoading = false;
       });
     } catch (e) {
@@ -227,43 +238,30 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     }
   }
 
-  Future<String?> _askCompletionNote(String taskTitle) async {
-    final ctrl = TextEditingController();
-    return showDialog<String>(
+  Future<_CompletionResult?> _showCompletionDialog(Task task, {String actionLabel = 'Complete'}) {
+    return showDialog<_CompletionResult>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: Text('Complete "$taskTitle"'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          maxLines: 3,
-          decoration: const InputDecoration(
-            labelText: 'Note (optional)',
-            hintText: 'Any observations or follow-ups…',
-            border: OutlineInputBorder(),
-          ),
-          onSubmitted: (_) => Navigator.pop(context, ctrl.text.trim()),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, ctrl.text.trim()),
-            child: const Text('Done'),
-          ),
-        ],
-      ),
+      builder: (_) => _CompletionDialog(task: task, actionLabel: actionLabel),
     );
   }
 
   Future<void> _toggleComplete(Task task) async {
-    // Only prompt for a note when marking done (not when un-completing).
-    String? note;
-    if (!task.isCompleted) {
-      note = await _askCompletionNote(task.title);
-      if (note == null) return; // user cancelled
-    }
     try {
-      final updated = await TaskApiService.toggleComplete(task.id, note: note?.isEmpty == true ? null : note);
+      Task updated;
+      if (task.isCompleted) {
+        // Un-completing never needs the dialog.
+        updated = await TaskApiService.toggleComplete(task.id);
+      } else {
+        final res = await _showCompletionDialog(task);
+        if (res == null) return; // user cancelled
+        updated = await TaskApiService.toggleComplete(
+          task.id,
+          note: res.note,
+          startedAt: res.startedAt,
+          endedAt: res.endedAt,
+          recurrenceAdvanceMode: res.advanceMode,
+        );
+      }
       setState(() {
         final idx = _tasks.indexWhere((t) => t.id == task.id);
         if (idx >= 0) _tasks[idx] = updated;
@@ -286,10 +284,16 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   }
 
   Future<void> _skipTask(Task task) async {
-    final note = await _askCompletionNote(task.title);
-    if (note == null) return; // user cancelled
+    final res = await _showCompletionDialog(task, actionLabel: 'Skip');
+    if (res == null) return; // user cancelled
     try {
-      await TaskApiService.skipTask(task.id, note: note.isEmpty ? null : note);
+      await TaskApiService.skipTask(
+        task.id,
+        note: res.note,
+        startedAt: res.startedAt,
+        endedAt: res.endedAt,
+        recurrenceAdvanceMode: res.advanceMode,
+      );
       await _load();
     } catch (e) {
       _showError(e.toString());
@@ -446,6 +450,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     try {
       await TaskApiService.startSession(task.id);
       setState(() => _activeSessions.add(task.id));
+      await _load();
     } catch (e) {
       _showError(e.toString());
     }
@@ -455,6 +460,16 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     try {
       await TaskApiService.stopSession(task.id);
       setState(() => _activeSessions.remove(task.id));
+      await _load();
+    } catch (e) {
+      _showError(e.toString());
+    }
+  }
+
+  Future<void> _restartSession(Task task, String mode, DateTime? startedAt) async {
+    try {
+      await TaskApiService.restartSession(task.id, mode: mode, startedAt: startedAt);
+      setState(() => _activeSessions.add(task.id));
       await _load();
     } catch (e) {
       _showError(e.toString());
@@ -566,11 +581,129 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     return t.subtasks.any(_treeMatchesTagFilter);
   }
 
+  // ── Search matching ─────────────────────────────────────────────────────────
+
+  /// All searchable text for a task, lower-cased: title, description, tag
+  /// names, and the due date (both MM-DD-YY and the relative label).
+  String _searchHaystack(Task t) {
+    final parts = <String>[
+      t.title,
+      t.description ?? '',
+      ...t.tags.map((tag) => tag.name),
+    ];
+    if (t.dueDate != null) {
+      final d = t.dueDate!;
+      parts.add(
+        '${d.month.toString().padLeft(2, '0')}-'
+        '${d.day.toString().padLeft(2, '0')}-'
+        '${(d.year % 100).toString().padLeft(2, '0')}',
+      );
+      parts.add(t.dueDateLabel);
+    }
+    return parts.join(' ').toLowerCase();
+  }
+
+  /// Tokenize the query into terms and AND/OR operators. Double-quoted spans
+  /// become a single phrase term (operators inside quotes are literal text).
+  List<_SearchToken> _tokenizeSearch(String query) {
+    final tokens = <_SearchToken>[];
+    final buf = StringBuffer();
+    bool inQuotes = false;
+    bool quoted = false; // current buffer originated from a quoted span
+
+    void flush() {
+      final text = buf.toString();
+      buf.clear();
+      if (text.isEmpty) {
+        if (quoted) tokens.add(const _SearchToken.term('')); // keep empty? skip
+        quoted = false;
+        return;
+      }
+      if (!quoted) {
+        final upper = text.toUpperCase();
+        if (upper == 'AND') { tokens.add(const _SearchToken.op('AND')); quoted = false; return; }
+        if (upper == 'OR') { tokens.add(const _SearchToken.op('OR')); quoted = false; return; }
+      }
+      tokens.add(_SearchToken.term(text.toLowerCase()));
+      quoted = false;
+    }
+
+    for (final rune in query.runes) {
+      final ch = String.fromCharCode(rune);
+      if (ch == '"') {
+        if (inQuotes) { inQuotes = false; flush(); }
+        else { flush(); inQuotes = true; quoted = true; }
+      } else if (!inQuotes && ch.trim().isEmpty) {
+        flush();
+      } else {
+        buf.write(ch);
+      }
+    }
+    flush();
+    return tokens.where((t) => !(t.isTerm && t.value.isEmpty)).toList();
+  }
+
+  /// True if [haystack] satisfies the query. Empty query matches everything.
+  /// Semantics: OR-of-ANDs — explicit AND binds tighter than OR; adjacent
+  /// terms with no operator default to OR.
+  bool _searchMatches(String haystack, List<_SearchToken> tokens) {
+    if (tokens.isEmpty) return true;
+    final groups = <List<String>>[];
+    var current = <String>[];
+    var pendingOp = 'OR';
+    for (final tok in tokens) {
+      if (tok.isOp) {
+        pendingOp = tok.value;
+        continue;
+      }
+      if (current.isEmpty) {
+        current.add(tok.value);
+      } else if (pendingOp == 'AND') {
+        current.add(tok.value);
+      } else {
+        groups.add(current);
+        current = [tok.value];
+      }
+      pendingOp = 'OR';
+    }
+    if (current.isNotEmpty) groups.add(current);
+    if (groups.isEmpty) return true;
+    // Match if any AND-group is fully satisfied.
+    return groups.any((group) => group.every(haystack.contains));
+  }
+
+  bool _matchesSearch(Task t) {
+    final tokens = _tokenizeSearch(_searchQuery);
+    if (tokens.isEmpty) return true;
+    return _searchMatches(_searchHaystack(t), tokens);
+  }
+
+  bool _treeMatchesSearch(Task t) {
+    if (_searchQuery.trim().isEmpty) return true;
+    if (_matchesSearch(t)) return true;
+    return t.subtasks.any(_treeMatchesSearch);
+  }
+
   void _flatten(Task t, List<Task> out) {
     out.add(t);
     for (final s in t.subtasks) {
       _flatten(s, out);
     }
+  }
+
+  /// Collect the ids of every task (at any depth) with an active work session.
+  Set<int> _collectActiveSessionIds(List<Task> tasks) {
+    final ids = <int>{};
+    void visit(Task t) {
+      if (t.isSessionActive) ids.add(t.id);
+      for (final s in t.subtasks) {
+        visit(s);
+      }
+    }
+    for (final t in tasks) {
+      visit(t);
+    }
+    return ids;
   }
 
   /// The task list to render given the active view + sort + tag filter.
@@ -583,11 +716,14 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
       for (final t in _tasks) {
         _flatten(t, all);
       }
-      final filtered = all.where(_matchesTagFilter).toList();
+      final filtered =
+          all.where((t) => _matchesTagFilter(t) && _matchesSearch(t)).toList();
       filtered.sort((a, b) => _cmpNullable(_metric(a, now), _metric(b, now)));
       return filtered;
     }
-    final roots = _tasks.where(_treeMatchesTagFilter).toList();
+    final roots = _tasks
+        .where((t) => _treeMatchesTagFilter(t) && _treeMatchesSearch(t))
+        .toList();
     roots.sort((a, b) => _cmpNullable(
           _representativeMetric(a, now),
           _representativeMetric(b, now),
@@ -1110,6 +1246,15 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
       appBar: _selectionMode ? _buildSelectionAppBar() : _buildNormalAppBar(),
       body: Column(
         children: [
+          // Search bar
+          _SearchBar(
+            controller: _searchCtrl,
+            onChanged: (v) => setState(() => _searchQuery = v),
+            onClear: () => setState(() {
+              _searchCtrl.clear();
+              _searchQuery = '';
+            }),
+          ),
           // Tag filter + completed toggle
           _FilterBar(
             tags: _tags,
@@ -1133,6 +1278,20 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
             onSortSelected: _setSortMode,
           ),
           Expanded(child: _buildBody()),
+          // ── New-task button: kept directly above the AI panel so it stays
+          // reachable even when the assistant is expanded. ─────────────────
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(0, 4, 16, 8),
+              child: FloatingActionButton(
+                heroTag: 'todo_new_task_fab',
+                onPressed: () => _openForm(),
+                tooltip: 'New task',
+                child: const Icon(Icons.add),
+              ),
+            ),
+          ),
           // ── AI Assistant panel ────────────────────────────────────────────
           AgentChatPanel(
             title: 'AI Assistant',
@@ -1154,11 +1313,6 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
             },
           ),
         ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _openForm(),
-        tooltip: 'New task',
-        child: const Icon(Icons.add),
       ),
     );
   }
@@ -1266,6 +1420,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
                 onDelete: _selectionMode ? null : _deleteTask,
                 onStartSession: _selectionMode ? null : _startSession,
                 onStopSession: _selectionMode ? null : _stopSession,
+                onRestartSession: _selectionMode ? null : _restartSession,
               );
               return GestureDetector(
                 onLongPress: _selectionMode ? null : () => _enterSelectionMode(task.id),
@@ -1698,10 +1853,64 @@ class _TaskCompletionWrapperState extends State<_TaskCompletionWrapper>
   }
 }
 
+/// A single token in a parsed search query: either a search term or a
+/// boolean operator ("AND" / "OR").
+class _SearchToken {
+  final bool isOp;
+  final String value;
+
+  const _SearchToken.term(this.value) : isOp = false;
+  const _SearchToken.op(this.value) : isOp = true;
+
+  bool get isTerm => !isOp;
+}
+
+/// Search bar shown at the top of the todo list. Supports general searches plus
+/// quoted "phrases" and AND/OR operators.
+class _SearchBar extends StatelessWidget {
+  final TextEditingController controller;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onClear;
+
+  const _SearchBar({
+    required this.controller,
+    required this.onChanged,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: TextField(
+        controller: controller,
+        onChanged: onChanged,
+        textInputAction: TextInputAction.search,
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: 'Search title, description, tags, dates…',
+          prefixIcon: const Icon(Icons.search, size: 20),
+          suffixIcon: controller.text.isEmpty
+              ? Tooltip(
+                  message: 'Use "quotes" for phrases and AND / OR for advanced queries',
+                  child: Icon(Icons.info_outline, size: 18, color: Colors.grey[500]),
+                )
+              : IconButton(
+                  icon: const Icon(Icons.clear, size: 18),
+                  tooltip: 'Clear search',
+                  onPressed: onClear,
+                ),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        ),
+      ),
+    );
+  }
+}
+
 class _SortBar extends StatelessWidget {  final TaskSortMode sortMode;
   final String Function(TaskSortMode) labelFor;
   final void Function(TaskSortMode) onSortSelected;
-
   const _SortBar({
     required this.sortMode,
     required this.labelFor,
@@ -2023,6 +2232,202 @@ class _ProjectSwitcherSheet extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── Completion dialog ──────────────────────────────────────────────────────────
+
+/// Result of the completion dialog: an optional note, the start/stop times to
+/// record for the work interval, and (for recurring tasks) the chosen
+/// recurrence-advancement mode ("now" or "stop").
+class _CompletionResult {
+  final String? note;
+  final DateTime startedAt;
+  final DateTime endedAt;
+  final String? advanceMode; // null for non-recurring tasks
+
+  const _CompletionResult({
+    this.note,
+    required this.startedAt,
+    required this.endedAt,
+    this.advanceMode,
+  });
+}
+
+/// Dialog shown when marking a task done (or skipping it). Lets the user review
+/// and edit the assumed start/stop times, add a note, and — for recurring tasks
+/// — choose how the next occurrence is scheduled.
+class _CompletionDialog extends StatefulWidget {
+  final Task task;
+  final String actionLabel; // "Complete" | "Skip"
+
+  const _CompletionDialog({required this.task, this.actionLabel = 'Complete'});
+
+  @override
+  State<_CompletionDialog> createState() => _CompletionDialogState();
+}
+
+class _CompletionDialogState extends State<_CompletionDialog> {
+  static final DateFormat _fmt = DateFormat('MMM d, yyyy · h:mm a');
+
+  final TextEditingController _noteCtrl = TextEditingController();
+  late DateTime _start;
+  late DateTime _end;
+  late String _advanceMode;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final now = DateTime.now();
+    // Default the start to the running session's start (if any), otherwise now.
+    _start = widget.task.activeSessionStartedAt?.toLocal() ?? now;
+    _end = now;
+    _advanceMode = widget.task.recurrenceAdvanceMode; // "now" by default
+  }
+
+  @override
+  void dispose() {
+    _noteCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<DateTime?> _pickDateTime(DateTime initial) async {
+    final now = DateTime.now();
+    final date = await showDatePicker(
+      context: context,
+      initialDate: initial.isAfter(now) ? now : initial,
+      firstDate: DateTime(now.year - 5),
+      lastDate: now,
+    );
+    if (date == null || !mounted) return null;
+    final time = await showTimePicker(
+      // ignore: use_build_context_synchronously
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initial),
+    );
+    if (time == null) return null;
+    return DateTime(date.year, date.month, date.day, time.hour, time.minute);
+  }
+
+  void _validate() {
+    final now = DateTime.now().add(const Duration(minutes: 1)); // small skew
+    if (_end.isBefore(_start)) {
+      _error = 'Stop time cannot be before start time.';
+    } else if (_start.isAfter(now) || _end.isAfter(now)) {
+      _error = 'Times cannot be in the future.';
+    } else {
+      _error = null;
+    }
+  }
+
+  void _submit() {
+    setState(_validate);
+    if (_error != null) return;
+    final note = _noteCtrl.text.trim();
+    Navigator.pop(
+      context,
+      _CompletionResult(
+        note: note.isEmpty ? null : note,
+        startedAt: _start,
+        endedAt: _end,
+        advanceMode: widget.task.isRecurring ? _advanceMode : null,
+      ),
+    );
+  }
+
+  Widget _timeRow(String label, DateTime value, ValueChanged<DateTime> onPicked) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 48,
+            child: Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
+          ),
+          Expanded(
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.schedule, size: 16),
+              label: Text(_fmt.format(value), style: const TextStyle(fontSize: 13)),
+              style: OutlinedButton.styleFrom(
+                alignment: Alignment.centerLeft,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              ),
+              onPressed: () async {
+                final picked = await _pickDateTime(value);
+                if (picked != null) setState(() => onPicked(picked));
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('${widget.actionLabel} "${widget.task.title}"'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.task.isSessionActive
+                  ? 'Adjust the work interval if needed.'
+                  : 'This task was never started — defaults to now. Adjust if you '
+                    'finished it earlier.',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+            const SizedBox(height: 8),
+            _timeRow('Start', _start, (v) => _start = v),
+            _timeRow('Stop', _end, (v) => _end = v),
+            if (_error != null) ...[
+              const SizedBox(height: 4),
+              Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+            ],
+            const SizedBox(height: 12),
+            TextField(
+              controller: _noteCtrl,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'Note (optional)',
+                hintText: 'Any observations or follow-ups…',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            if (widget.task.isRecurring) ...[
+              const Divider(height: 24),
+              const Text('Next occurrence', style: TextStyle(fontWeight: FontWeight.w600)),
+              RadioListTile<String>(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                value: 'now',
+                groupValue: _advanceMode,
+                onChanged: (v) => setState(() => _advanceMode = v!),
+                title: const Text('Next time from now'),
+                subtitle: const Text('Skip any missed occurrences and schedule the next one after today.'),
+              ),
+              RadioListTile<String>(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                value: 'stop',
+                groupValue: _advanceMode,
+                onChanged: (v) => setState(() => _advanceMode = v!),
+                title: const Text('Next time after the stop time'),
+                subtitle: const Text('Schedule the next occurrence right after the stop time above.'),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        ElevatedButton(onPressed: _submit, child: Text(widget.actionLabel)),
+      ],
     );
   }
 }

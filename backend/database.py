@@ -214,6 +214,10 @@ class Task(Base):
     completed_at = Column(DateTime, nullable=True)
     is_recurring = Column(Boolean, nullable=False, default=False)
     recurrence_rule = Column(String, nullable=True)  # "DAILY" | "WEEKLY" | "MONTHLY"
+    # How a recurring task advances on completion: "now" (next iteration after
+    # the current moment, skipping missed ones) or "stop" (next iteration after
+    # the selected stop time).
+    recurrence_advance_mode = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(
         DateTime,
@@ -466,6 +470,7 @@ def init_db():
         "ALTER TABLE task_completions ADD COLUMN status TEXT DEFAULT 'completed'",
         "ALTER TABLE task_completions ADD COLUMN work_sessions_json TEXT",
         "ALTER TABLE task_completions ADD COLUMN note TEXT",
+        "ALTER TABLE tasks ADD COLUMN recurrence_advance_mode TEXT",
     ]
     with engine.connect() as conn:
         for stmt in _migrations:
