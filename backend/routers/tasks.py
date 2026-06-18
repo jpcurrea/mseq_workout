@@ -1541,6 +1541,88 @@ async def stop_session(
     }
 
 
+def _serialize_work_session(s: "WorkSession", now: datetime.datetime) -> Dict[str, Any]:
+    ended = s.ended_at
+    duration = round(((ended or now) - s.started_at).total_seconds() / 60.0, 2)
+    return {
+        "id": s.id,
+        "started_at": s.started_at.isoformat(),
+        "ended_at": ended.isoformat() if ended else None,
+        "duration_minutes": duration,
+        "active": ended is None,
+        "notes": s.notes,
+    }
+
+
+class TaskSessionEdit(BaseModel):
+    started_at: datetime.datetime
+    ended_at: datetime.datetime
+    notes: Optional[str] = None
+
+
+class TaskSessionsUpdate(BaseModel):
+    sessions: List[TaskSessionEdit]
+
+
+@tasks_router.get("/{task_id}/sessions")
+async def list_task_sessions(
+    task_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Live work-session history for a task: every interval worked so far,
+    including the currently-active one (``ended_at`` is null)."""
+    task = _load_task(task_id, user_id, session)
+    now = datetime.datetime.utcnow()
+    rows = sorted(task.work_sessions, key=lambda s: s.started_at)
+    return [_serialize_work_session(s, now) for s in rows]
+
+
+@tasks_router.patch("/{task_id}/sessions")
+async def update_task_sessions(
+    task_id: int,
+    body: TaskSessionsUpdate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Replace a task's *completed* work-session intervals with the supplied
+    list. Each interval is revalidated. The currently-active session (if any)
+    is preserved untouched, so time can be edited without stopping the clock."""
+    task = _load_task(task_id, user_id, session)
+    _assert_can_write(task.project_id, user_id, session)
+
+    now = datetime.datetime.utcnow()
+    skew = datetime.timedelta(minutes=1)
+    cleaned: List[tuple] = []
+    for s in body.sessions:
+        started = _to_naive_utc(s.started_at)
+        ended = _to_naive_utc(s.ended_at)
+        if ended < started:
+            raise HTTPException(status_code=422, detail="ended_at cannot be before started_at")
+        if started > now + skew or ended > now + skew:
+            raise HTTPException(status_code=422, detail="times cannot be in the future")
+        cleaned.append((started, ended, s.notes or None))
+
+    # Drop existing completed sessions; keep the active one running.
+    for ws in list(task.work_sessions):
+        if ws.ended_at is not None:
+            session.delete(ws)
+
+    for started, ended, notes in cleaned:
+        session.add(WorkSession(
+            task_id=task.id,
+            user_id=task.user_id,
+            started_at=started,
+            ended_at=ended,
+            notes=notes,
+        ))
+
+    session.commit()
+    session.refresh(task)
+    rows = sorted(task.work_sessions, key=lambda s: s.started_at)
+    return [_serialize_work_session(s, now) for s in rows]
+
+
 # ── Plan endpoints ─────────────────────────────────────────────────────────────
 
 class PlanCreate(BaseModel):

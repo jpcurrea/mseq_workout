@@ -68,6 +68,11 @@ class _TaskCardState extends State<TaskCard> {
   bool _historyExpanded = false;
   bool _historyLoading = false;
 
+  // Live work-session history for non-recurring tasks.
+  List<Map<String, dynamic>>? _sessions;
+  bool _sessionsExpanded = false;
+  bool _sessionsLoading = false;
+
   /// Ticks while a work session is active and the full card is visible so the
   /// progress bar reflects elapsed time without needing a server round-trip.
   Timer? _liveTimer;
@@ -84,6 +89,12 @@ class _TaskCardState extends State<TaskCard> {
     if (oldWidget.isSessionActive != widget.isSessionActive ||
         oldWidget.isPreview != widget.isPreview) {
       _syncLiveTimer();
+    }
+    // A start/stop changes the live work-session list — refresh it if loaded.
+    if (oldWidget.isSessionActive != widget.isSessionActive &&
+        !widget.task.isRecurring &&
+        _sessions != null) {
+      _reloadSessions();
     }
   }
 
@@ -134,6 +145,28 @@ class _TaskCardState extends State<TaskCard> {
       if (mounted) {
         setState(() => _completions = rows);
       }
+    } catch (_) {
+      // Keep the existing rows on a transient failure.
+    }
+  }
+
+  void _maybeLoadSessions() {
+    if (_sessions != null || _sessionsLoading) return;
+    setState(() => _sessionsLoading = true);
+    TaskApiService.getTaskSessions(widget.task.id)
+        .then((rows) {
+          if (mounted) setState(() { _sessions = rows; _sessionsLoading = false; });
+        })
+        .catchError((_) {
+          if (mounted) setState(() { _sessions = []; _sessionsLoading = false; });
+        });
+  }
+
+  /// Force-refreshes the live work-session history (used after an edit).
+  Future<void> _reloadSessions() async {
+    try {
+      final rows = await TaskApiService.getTaskSessions(widget.task.id);
+      if (mounted) setState(() => _sessions = rows);
     } catch (_) {
       // Keep the existing rows on a transient failure.
     }
@@ -286,7 +319,11 @@ class _TaskCardState extends State<TaskCard> {
   Widget _buildFullCard(BuildContext context) {
     final task = widget.task;
     final indent = widget.depth * 16.0;
-    _maybeLoadHistory();
+    if (task.isRecurring) {
+      _maybeLoadHistory();
+    } else {
+      _maybeLoadSessions();
+    }
 
     return Padding(
       padding: EdgeInsets.only(left: indent, bottom: 8),
@@ -415,24 +452,47 @@ class _TaskCardState extends State<TaskCard> {
                           child: _PunctualityBadge(task: task),
                         ),
 
-                      // Completion history table (recurring / any task with history)
-                      if (_historyLoading)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 6, left: 30),
-                          child: SizedBox(height: 16, width: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2)),
-                        )
-                      else if (_completions != null && _completions!.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 6, left: 30),
-                          child: _CompletionHistoryTable(
-                            rows: _completions!,
-                            expanded: _historyExpanded,
-                            timeUnit: widget.timeUnit,
-                            onToggle: () => setState(() => _historyExpanded = !_historyExpanded),
-                            onEdited: _reloadHistory,
+                      // Work history: recurring tasks show their completion
+                      // record; non-recurring tasks show their live work
+                      // sessions (start/stop/duration), both tappable to edit.
+                      if (task.isRecurring) ...[
+                        if (_historyLoading)
+                          const Padding(
+                            padding: EdgeInsets.only(top: 6, left: 30),
+                            child: SizedBox(height: 16, width: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2)),
+                          )
+                        else if (_completions != null && _completions!.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6, left: 30),
+                            child: _CompletionHistoryTable(
+                              rows: _completions!,
+                              expanded: _historyExpanded,
+                              timeUnit: widget.timeUnit,
+                              onToggle: () => setState(() => _historyExpanded = !_historyExpanded),
+                              onEdited: _reloadHistory,
+                            ),
                           ),
-                        ),
+                      ] else ...[
+                        if (_sessionsLoading)
+                          const Padding(
+                            padding: EdgeInsets.only(top: 6, left: 30),
+                            child: SizedBox(height: 16, width: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2)),
+                          )
+                        else if (_sessions != null && _sessions!.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6, left: 30),
+                            child: _SessionHistoryTable(
+                              taskId: task.id,
+                              sessions: _sessions!,
+                              expanded: _sessionsExpanded,
+                              timeUnit: widget.timeUnit,
+                              onToggle: () => setState(() => _sessionsExpanded = !_sessionsExpanded),
+                              onEdited: _reloadSessions,
+                            ),
+                          ),
+                      ],
 
                       // Start / Stop button + subtask expand
                       Padding(
@@ -535,11 +595,20 @@ class _CompletionHistoryTable extends StatelessWidget {
   Future<void> _editRow(BuildContext context, Map<String, dynamic> r) async {
     final completionId = r['id'] as int?;
     if (completionId == null) return;
+    final rawSessions = (r['work_sessions'] is List)
+        ? List<Map<String, dynamic>>.from(
+            (r['work_sessions'] as List).whereType<Map>())
+        : <Map<String, dynamic>>[];
+    final actual = r['actual_minutes'];
     final saved = await showDialog<bool>(
       context: context,
-      builder: (_) => _EditCompletionSessionsDialog(
-        completion: r,
+      builder: (_) => _EditWorkSessionsDialog(
+        initialSessions: rawSessions,
+        fallbackEnd: DateTime.tryParse('${r['completed_at']}'),
+        fallbackMinutes: (actual is num && actual > 0) ? actual.round() : 0,
         timeUnit: timeUnit,
+        onSave: (sessions) =>
+            TaskApiService.updateCompletionSessions(completionId, sessions),
       ),
     );
     if (saved == true && onEdited != null) {
@@ -692,6 +761,198 @@ class _CompletionHistoryTable extends StatelessWidget {
   }
 }
 
+/// Live work-session history for a non-recurring task: one row per work
+/// session worked so far (start, stop, duration). Tapping the table opens the
+/// same interval editor used for completed tasks.
+class _SessionHistoryTable extends StatelessWidget {
+  final int taskId;
+  final List<Map<String, dynamic>> sessions;
+  final bool expanded;
+  final String timeUnit;
+  final VoidCallback onToggle;
+
+  /// Called after the task's work sessions have been edited so the parent can
+  /// reload them from the server.
+  final Future<void> Function()? onEdited;
+
+  const _SessionHistoryTable({
+    required this.taskId,
+    required this.sessions,
+    required this.expanded,
+    required this.onToggle,
+    this.timeUnit = 'hours',
+    this.onEdited,
+  });
+
+  static final _dateFmt = DateFormat('MM-dd-yy');
+  static final _timeFmt = DateFormat('h:mm a');
+
+  String _fmtDate(String? iso) {
+    if (iso == null) return '—';
+    final dt = DateTime.tryParse(iso);
+    return dt == null ? iso : _dateFmt.format(dt.toLocal());
+  }
+
+  String _fmtTimeRange(Map<String, dynamic> s) {
+    final start = DateTime.tryParse('${s['started_at']}')?.toLocal();
+    if (start == null) return '—';
+    final end = DateTime.tryParse('${s['ended_at']}')?.toLocal();
+    if (end == null) return '${_timeFmt.format(start)} – running';
+    return '${_timeFmt.format(start)} – ${_timeFmt.format(end)}';
+  }
+
+  String _fmtDuration(Object? minutes) {
+    if (minutes is! num) return '—';
+    return formatTaskDuration(minutes.round(), timeUnit);
+  }
+
+  /// Opens the interval editor seeded with the task's completed sessions.
+  Future<void> _edit(BuildContext context) async {
+    final completed = sessions
+        .where((s) => s['ended_at'] != null)
+        .map((s) => <String, dynamic>{
+              'started_at': s['started_at'],
+              'ended_at': s['ended_at'],
+              'notes': s['notes'],
+            })
+        .toList();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => _EditWorkSessionsDialog(
+        initialSessions: completed,
+        timeUnit: timeUnit,
+        onSave: (s) => TaskApiService.updateTaskSessions(taskId, s),
+      ),
+    );
+    if (saved == true && onEdited != null) {
+      await onEdited!();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Header toggle row
+        GestureDetector(
+          onTap: onToggle,
+          behavior: HitTestBehavior.opaque,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(expanded ? Icons.expand_less : Icons.expand_more,
+                  size: 16, color: Colors.grey[600]),
+              const SizedBox(width: 4),
+              Text(
+                'Sessions (${sessions.length})',
+                style: TextStyle(fontSize: 12, color: Colors.grey[600], fontWeight: FontWeight.w500),
+              ),
+              if (expanded) ...[
+                const SizedBox(width: 6),
+                Text(
+                  '· tap a row to edit times',
+                  style: TextStyle(fontSize: 10, color: Colors.grey[500], fontStyle: FontStyle.italic),
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (expanded) ...[
+          const SizedBox(height: 6),
+          Table(
+            columnWidths: const {
+              0: IntrinsicColumnWidth(),   // status icon
+              1: IntrinsicColumnWidth(),   // date
+              2: IntrinsicColumnWidth(),   // time range
+              3: FlexColumnWidth(),        // duration
+            },
+            defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+            children: [
+              // Header row
+              TableRow(
+                decoration: BoxDecoration(
+                  border: Border(bottom: BorderSide(color: Colors.grey[300]!)),
+                ),
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4, right: 8),
+                    child: Text('', style: TextStyle(fontSize: 10, color: Colors.grey[500])),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4, right: 12),
+                    child: Text('Date', style: TextStyle(fontSize: 10, color: Colors.grey[500], fontWeight: FontWeight.w600)),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4, right: 12),
+                    child: Text('Start – Stop', style: TextStyle(fontSize: 10, color: Colors.grey[500], fontWeight: FontWeight.w600)),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text('Duration', style: TextStyle(fontSize: 10, color: Colors.grey[500], fontWeight: FontWeight.w600)),
+                  ),
+                ],
+              ),
+              // Data rows
+              for (final s in sessions)
+                TableRow(
+                  children: [
+                    TableRowInkWell(
+                      onTap: () => _edit(context),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+                        child: (s['active'] == true)
+                            ? const Tooltip(
+                                message: 'Running',
+                                child: Icon(Icons.play_arrow, size: 14, color: Colors.blue),
+                              )
+                            : const Tooltip(
+                                message: 'Completed',
+                                child: Icon(Icons.check, size: 14, color: Colors.green),
+                              ),
+                      ),
+                    ),
+                    TableRowInkWell(
+                      onTap: () => _edit(context),
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 3, bottom: 3, right: 24),
+                        child: Text(
+                          _fmtDate(s['started_at'] as String?),
+                          style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurface),
+                        ),
+                      ),
+                    ),
+                    TableRowInkWell(
+                      onTap: () => _edit(context),
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 3, bottom: 3, right: 24),
+                        child: Text(
+                          _fmtTimeRange(s),
+                          style: TextStyle(fontSize: 11, color: Colors.grey[700]),
+                        ),
+                      ),
+                    ),
+                    TableRowInkWell(
+                      onTap: () => _edit(context),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        child: Text(
+                          _fmtDuration(s['duration_minutes']),
+                          style: TextStyle(fontSize: 11, color: Colors.grey[700]),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 /// One editable work-session interval inside the completion editor.
 class _SessionDraft {
   DateTime start;
@@ -705,25 +966,39 @@ class _SessionDraft {
   }
 }
 
-/// Dialog that lets the user edit each recorded work-session interval of a past
-/// completion. Start/stop times are editable per interval; durations and the
-/// completion total are recomputed on save.
-class _EditCompletionSessionsDialog extends StatefulWidget {
-  final Map<String, dynamic> completion;
+/// Dialog that lets the user edit a set of work-session intervals. Start/stop
+/// times are editable per interval; durations and the total are recomputed on
+/// save. Used both for past completions and for a task's live work sessions —
+/// the caller supplies the initial intervals and the [onSave] handler.
+class _EditWorkSessionsDialog extends StatefulWidget {
+  /// Initial intervals. Each entry may contain `started_at` / `ended_at` as ISO
+  /// strings (intervals without both ends are skipped).
+  final List<Map<String, dynamic>> initialSessions;
+
+  /// Persists the edited intervals. Each entry contains `started_at` and
+  /// `ended_at` as `DateTime` objects and may include `notes`.
+  final Future<void> Function(List<Map<String, dynamic>> sessions) onSave;
+
+  /// Seed for a single interval when [initialSessions] yields nothing.
+  final DateTime? fallbackEnd;
+  final int fallbackMinutes;
   final String timeUnit;
 
-  const _EditCompletionSessionsDialog({
-    required this.completion,
+  const _EditWorkSessionsDialog({
+    required this.initialSessions,
+    required this.onSave,
+    this.fallbackEnd,
+    this.fallbackMinutes = 0,
     this.timeUnit = 'hours',
   });
 
   @override
-  State<_EditCompletionSessionsDialog> createState() =>
-      _EditCompletionSessionsDialogState();
+  State<_EditWorkSessionsDialog> createState() =>
+      _EditWorkSessionsDialogState();
 }
 
-class _EditCompletionSessionsDialogState
-    extends State<_EditCompletionSessionsDialog> {
+class _EditWorkSessionsDialogState
+    extends State<_EditWorkSessionsDialog> {
   static final _fmt = DateFormat('MMM d, yyyy · h:mm a');
 
   late List<_SessionDraft> _sessions;
@@ -737,29 +1012,22 @@ class _EditCompletionSessionsDialogState
   }
 
   List<_SessionDraft> _initialSessions() {
-    final raw = widget.completion['work_sessions'];
     final result = <_SessionDraft>[];
-    if (raw is List) {
-      for (final item in raw) {
-        if (item is! Map) continue;
-        final start = DateTime.tryParse('${item['started_at']}')?.toLocal();
-        final end = DateTime.tryParse('${item['ended_at']}')?.toLocal();
-        if (start == null || end == null) continue;
-        result.add(_SessionDraft(
-          start: start,
-          end: end,
-          notes: item['notes'] as String?,
-        ));
-      }
+    for (final item in widget.initialSessions) {
+      final start = DateTime.tryParse('${item['started_at']}')?.toLocal();
+      final end = DateTime.tryParse('${item['ended_at']}')?.toLocal();
+      if (start == null || end == null) continue;
+      result.add(_SessionDraft(
+        start: start,
+        end: end,
+        notes: item['notes'] as String?,
+      ));
     }
     if (result.isEmpty) {
-      // Legacy / single-shot completions: seed one interval from completed_at
-      // and the recorded total so the user has something to edit.
-      final end = DateTime.tryParse('${widget.completion['completed_at']}')
-              ?.toLocal() ??
-          DateTime.now();
-      final actual = widget.completion['actual_minutes'];
-      final minutes = (actual is num && actual > 0) ? actual.round() : 0;
+      // Legacy / single-shot records: seed one interval from the fallback end
+      // and recorded total so the user has something to edit.
+      final end = widget.fallbackEnd?.toLocal() ?? DateTime.now();
+      final minutes = widget.fallbackMinutes;
       result.add(_SessionDraft(
         start: end.subtract(Duration(minutes: minutes)),
         end: end,
@@ -808,18 +1076,12 @@ class _EditCompletionSessionsDialogState
       setState(() => _error = problem);
       return;
     }
-    final completionId = widget.completion['id'] as int?;
-    if (completionId == null) {
-      setState(() => _error = 'Missing completion id.');
-      return;
-    }
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
-      await TaskApiService.updateCompletionSessions(
-        completionId,
+      await widget.onSave(
         _sessions
             .map((s) => {
                   'started_at': s.start,

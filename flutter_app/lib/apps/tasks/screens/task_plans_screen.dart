@@ -507,13 +507,36 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     } catch (_) {}
     if (!mounted) return;
 
-    final selected = await showDialog<Task>(
+    final result = await showDialog<Object>(
       context: context,
       builder: (_) => _TaskPickerDialog(tasks: tasks),
     );
-    if (selected == null) return;
+    if (result == _kCreateNewTaskSentinel) {
+      await _createAndInsertTask();
+      return;
+    }
+    if (result is Task) _insertTaskToken(result);
+  }
 
-    final token = '{{task:${selected.id}}}';
+  /// Opens the task form to create a brand-new task, then inserts its widget
+  /// token into the plan at the cursor.
+  Future<void> _createAndInsertTask() async {
+    if (_plan == null) return;
+    final created = await Navigator.of(context).push<Object>(
+      MaterialPageRoute(
+        builder: (_) => TaskFormScreen(
+          projectId: _plan!.projectId,
+          returnCreatedTask: true,
+        ),
+      ),
+    );
+    if (created is Task) _insertTaskToken(created);
+  }
+
+  /// Inserts a `{{task:ID}}` widget token for [task] at the cursor and makes it
+  /// renderable in the live preview immediately.
+  void _insertTaskToken(Task task) {
+    final token = '{{task:${task.id}}}';
     final pos = _contentCtrl.selection.baseOffset;
     final text = _contentCtrl.text;
     final newText = pos >= 0
@@ -523,7 +546,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     setState(() {
       // Make the inserted task renderable in the live preview immediately,
       // before the next save/reload repopulates the plan's task map.
-      _plan?.tasks[selected.id.toString()] = selected;
+      _plan?.tasks[task.id.toString()] = task;
       _hasChanges = true;
     });
   }
@@ -1370,6 +1393,10 @@ class _PlanPreviewView extends StatelessWidget {
 
 // ── Task picker dialog ────────────────────────────────────────────────────────
 
+/// Returned by [_TaskPickerDialog] when the user chooses to create a new task
+/// rather than pick an existing one.
+const Object _kCreateNewTaskSentinel = 'create_new_task';
+
 class _TaskPickerDialog extends StatefulWidget {
   final List<Task> tasks;
   const _TaskPickerDialog({required this.tasks});
@@ -1400,6 +1427,12 @@ class _TaskPickerDialogState extends State<_TaskPickerDialog> {
               onChanged: (v) => setState(() => _query = v),
             ),
             const SizedBox(height: 8),
+            ListTile(
+              leading: const Icon(Icons.add_task),
+              title: const Text('Create new task'),
+              onTap: () => Navigator.pop(context, _kCreateNewTaskSentinel),
+            ),
+            const Divider(height: 1),
             Expanded(
               child: ListView.builder(
                 itemCount: filtered.length,

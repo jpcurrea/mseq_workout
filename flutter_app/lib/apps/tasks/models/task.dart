@@ -112,15 +112,17 @@ class Task {
 
   String get dueDateLabel {
     if (dueDate == null) return '';
+    final due = dueDate!.toLocal();
     final now = DateTime.now();
-    final diff = dueDate!.difference(now);
-    if (diff.isNegative) {
-      final days = (-diff.inDays);
-      return days > 0 ? '${days}d overdue' : 'Overdue today';
-    }
-    if (diff.inDays == 0) return 'Due today';
-    if (diff.inDays == 1) return 'Due tomorrow';
-    return 'Due in ${diff.inDays}d';
+    // Compare by calendar day, not a rolling 24-hour window, so a task due
+    // early tomorrow doesn't read as "today" just because it's <24h away.
+    final dueDay = DateTime(due.year, due.month, due.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final dayDiff = dueDay.difference(today).inDays;
+    if (dayDiff == 0) return 'Due today';
+    if (dayDiff == 1) return 'Due tomorrow';
+    if (dayDiff < 0) return '${-dayDiff}d overdue';
+    return 'Due in ${dayDiff}d';
   }
 
   /// Punctuality badge text for completed tasks.

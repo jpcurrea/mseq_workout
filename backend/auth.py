@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from typing import Optional
 import secrets
+import logging
 
 # Import database models
 from database import create_session, User
@@ -47,12 +48,26 @@ if config.get('GITHUB_CLIENT_ID', default=None):
     )
 
 # JWT configuration
-SECRET_KEY = config.get('SECRET_KEY', default=secrets.token_urlsafe(32))
+_secret_from_env = config.get('SECRET_KEY', default=None)
+if _secret_from_env:
+    SECRET_KEY = _secret_from_env
+else:
+    # No stable secret configured. A random key means JWTs *and* Fernet-encrypted
+    # secrets (e.g. each user's saved LLM_API_KEY) become unreadable after every
+    # restart — which on Render's free tier happens whenever the service sleeps.
+    # Set a persistent SECRET_KEY env var in the deployment to fix this.
+    SECRET_KEY = secrets.token_urlsafe(32)
+    logging.getLogger("uvicorn.error").warning(
+        "SECRET_KEY is not set; using an ephemeral random key. Saved encrypted "
+        "secrets (such as per-user LLM API keys) and existing sessions will be "
+        "invalidated on every restart. Set a stable SECRET_KEY environment "
+        "variable in your deployment to persist them."
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
 # Frontend URL for redirects after auth
-FRONTEND_URL = config.get('FRONTEND_URL', default='https://mseq-workout.netlify.app')
+FRONTEND_URL = config.get('FRONTEND_URL', default='https://lazy-maxxing.netlify.app')
 
 # Backend base URL — used to build the OAuth redirect_uri
 # Override with BACKEND_URL env var when running locally

@@ -15,16 +15,16 @@ import 'shared/services/auth_service.dart';
 
 
 void main() {
-  runApp(const WorkoutApp());
+  runApp(const LazyMaxxingApp());
 }
 
-class WorkoutApp extends StatelessWidget {
-  const WorkoutApp({super.key});
+class LazyMaxxingApp extends StatelessWidget {
+  const LazyMaxxingApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Hub',
+      title: 'LazyMaxxing',
       navigatorKey: AuthService.navigatorKey,
       scaffoldMessengerKey: AuthService.messengerKey,
       theme: ThemeData(

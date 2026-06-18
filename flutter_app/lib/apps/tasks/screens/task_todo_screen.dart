@@ -212,6 +212,28 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
 
   Future<void> _load() => _loadProjectThenTasks();
 
+  /// Re-fetch tasks WITHOUT the full-screen loading spinner so the list,
+  /// scroll position, and each card's expansion state are preserved. Used
+  /// after session start/stop/restart where only individual cards change.
+  Future<void> _quietRefreshTasks() async {
+    if (_activeProject == null) return;
+    try {
+      final tasks = await TaskApiService.getTasks(
+        projectId: _activeProject!.id,
+        includeCompleted: _showCompleted,
+      );
+      if (!mounted) return;
+      setState(() {
+        _tasks = tasks;
+        _activeSessions
+          ..clear()
+          ..addAll(_collectActiveSessionIds(_tasks));
+      });
+    } catch (e) {
+      if (mounted) _showError(e.toString());
+    }
+  }
+
   Future<void> _loadTasks() async {
     if (_activeProject == null) return;
     setState(() { _isLoading = true; _error = null; });
@@ -450,7 +472,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     try {
       await TaskApiService.startSession(task.id);
       setState(() => _activeSessions.add(task.id));
-      await _load();
+      await _quietRefreshTasks();
     } catch (e) {
       _showError(e.toString());
     }
@@ -460,7 +482,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     try {
       await TaskApiService.stopSession(task.id);
       setState(() => _activeSessions.remove(task.id));
-      await _load();
+      await _quietRefreshTasks();
     } catch (e) {
       _showError(e.toString());
     }
@@ -470,7 +492,7 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     try {
       await TaskApiService.restartSession(task.id, mode: mode, startedAt: startedAt);
       setState(() => _activeSessions.add(task.id));
-      await _load();
+      await _quietRefreshTasks();
     } catch (e) {
       _showError(e.toString());
     }
@@ -830,6 +852,10 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
           Navigator.pop(context);
           _showRenameProject(p);
         },
+        onDelete: (p) {
+          Navigator.pop(context);
+          _deleteProject(p);
+        },
         onCreateNew: () => Navigator.pop(context, null),
         onJoin: () => Navigator.pop(context, _activeProject), // sentinel
       ),
@@ -871,6 +897,52 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
         _projects = projects;
         if (_activeProject?.id == updated.id) _activeProject = updated;
       });
+    } catch (e) {
+      _showError(e.toString());
+    }
+  }
+
+  Future<void> _deleteProject(Project project) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete Project'),
+        content: Text(
+          'Delete "${project.name}"? This permanently removes the project and '
+          'all of its tasks, plans, and history. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await ProjectApiService.deleteProject(project.id);
+      final projects = await ProjectApiService.getProjects();
+      final wasActive = _activeProject?.id == project.id;
+      Project? nextActive = _activeProject;
+      if (wasActive) {
+        nextActive = projects.isNotEmpty ? projects.first : null;
+        if (nextActive != null) {
+          await ProjectApiService.setActiveProject(nextActive.id);
+        }
+      }
+      setState(() {
+        _projects = projects;
+        _activeProject = nextActive;
+      });
+      if (wasActive) await _loadTasks();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Deleted "${project.name}"')),
+        );
+      }
     } catch (e) {
       _showError(e.toString());
     }
@@ -2173,6 +2245,7 @@ class _ProjectSwitcherSheet extends StatelessWidget {
   final int? activeProjectId;
   final void Function(Project) onSwitch;
   final void Function(Project) onRename;
+  final void Function(Project) onDelete;
   final VoidCallback onCreateNew;
   final VoidCallback onJoin;
 
@@ -2181,6 +2254,7 @@ class _ProjectSwitcherSheet extends StatelessWidget {
     required this.activeProjectId,
     required this.onSwitch,
     required this.onRename,
+    required this.onDelete,
     required this.onCreateNew,
     required this.onJoin,
   });
@@ -2212,6 +2286,12 @@ class _ProjectSwitcherSheet extends StatelessWidget {
                     icon: const Icon(Icons.edit_outlined, size: 20),
                     tooltip: 'Rename project',
                     onPressed: () => onRename(p),
+                  ),
+                if (p.isOwner)
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline, size: 20),
+                    tooltip: 'Delete project',
+                    onPressed: () => onDelete(p),
                   ),
                 if (p.id == activeProjectId)
                   Icon(Icons.check, color: Theme.of(context).colorScheme.primary),

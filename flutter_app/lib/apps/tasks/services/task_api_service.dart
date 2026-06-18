@@ -468,6 +468,39 @@ class TaskApiService {
     throw _err(r, 'Failed to update work sessions');
   }
 
+  /// Live work-session history for a task (every interval worked so far,
+  /// including the currently-active one where `ended_at` is null).
+  static Future<List<Map<String, dynamic>>> getTaskSessions(int taskId) async {
+    final r = await http.get(
+        Uri.parse('$_baseUrl/tasks/$taskId/sessions'), headers: await _headers());
+    if (r.statusCode == 200) return List<Map<String, dynamic>>.from(json.decode(r.body));
+    throw _err(r, 'Failed to load work sessions');
+  }
+
+  /// Replaces a task's *completed* work-session intervals. The active session
+  /// (if any) is preserved untouched. Each entry in [sessions] must contain
+  /// `started_at` and `ended_at` as `DateTime` objects and may include `notes`.
+  /// Returns the updated session list.
+  static Future<List<Map<String, dynamic>>> updateTaskSessions(
+      int taskId, List<Map<String, dynamic>> sessions) async {
+    final uri = Uri.parse('$_baseUrl/tasks/$taskId/sessions');
+    final payload = {
+      'sessions': sessions.map((s) {
+        final start = s['started_at'] as DateTime;
+        final end = s['ended_at'] as DateTime;
+        return {
+          'started_at': start.toUtc().toIso8601String(),
+          'ended_at': end.toUtc().toIso8601String(),
+          if (s['notes'] != null) 'notes': s['notes'],
+        };
+      }).toList(),
+    };
+    final r = await http.patch(uri,
+        headers: await _headers(), body: json.encode(payload));
+    if (r.statusCode == 200) return List<Map<String, dynamic>>.from(json.decode(r.body));
+    throw _err(r, 'Failed to update work sessions');
+  }
+
 
   /// Returns the raw CSV text of the project's completion record.
   static Future<String> exportCompletionsCsv({required int projectId}) async {

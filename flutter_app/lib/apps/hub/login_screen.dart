@@ -47,20 +47,20 @@ class _LoginScreenState extends State<LoginScreen> {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
-                Icons.fitness_center,
+                Icons.self_improvement,
                 size: 80,
                 color: Theme.of(context).colorScheme.primary,
               ),
               const SizedBox(height: 24),
               Text(
-                'Workout Routine',
+                'LazyMaxxing',
                 style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                       fontWeight: FontWeight.bold,
                     ),
               ),
               const SizedBox(height: 8),
               Text(
-                'Sign in to access your workouts',
+                'Sign in to get started',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       color: Colors.grey,
                     ),

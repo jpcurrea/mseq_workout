@@ -138,3 +138,85 @@ def test_restart_unknown_mode_rejected(http_client):
     task = ctx["task"]
     resp = client.post(f"/tasks/{task.id}/session/restart", json={"mode": "bogus"})
     assert resp.status_code == 422
+
+
+# ── list / edit a task's work sessions ────────────────────────────────────────
+
+def _add_completed_session(db, task, user_id, start, end):
+    ws = WorkSession(task_id=task.id, user_id=user_id, started_at=start, ended_at=end)
+    db.add(ws)
+    db.commit()
+    return ws
+
+
+def test_list_task_sessions_includes_active_and_completed(http_client):
+    client, ctx = http_client
+    db, task = ctx["db"], ctx["task"]
+    now = datetime.datetime.utcnow()
+    _add_completed_session(
+        db, task, ctx["user"].id,
+        now - datetime.timedelta(hours=3), now - datetime.timedelta(hours=2),
+    )
+    client.post(f"/tasks/{task.id}/start")  # one active session
+
+    resp = client.get(f"/tasks/{task.id}/sessions")
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert len(rows) == 2
+    active = [r for r in rows if r["active"]]
+    assert len(active) == 1
+    completed = [r for r in rows if not r["active"]]
+    assert completed[0]["duration_minutes"] == 60.0
+
+
+def test_update_task_sessions_replaces_completed_keeps_active(http_client):
+    client, ctx = http_client
+    db, task = ctx["db"], ctx["task"]
+    now = datetime.datetime.utcnow()
+    _add_completed_session(
+        db, task, ctx["user"].id,
+        now - datetime.timedelta(hours=5), now - datetime.timedelta(hours=4),
+    )
+    client.post(f"/tasks/{task.id}/start")  # active session must survive
+
+    new_start = (now - datetime.timedelta(hours=2)).isoformat()
+    new_end = (now - datetime.timedelta(hours=1)).isoformat()
+    resp = client.patch(
+        f"/tasks/{task.id}/sessions",
+        json={"sessions": [{"started_at": new_start, "ended_at": new_end}]},
+    )
+    assert resp.status_code == 200
+    rows = resp.json()
+    # One replaced completed session + the still-active one.
+    assert len([r for r in rows if not r["active"]]) == 1
+    assert len([r for r in rows if r["active"]]) == 1
+    edited = next(r for r in rows if not r["active"])
+    assert edited["duration_minutes"] == 60.0
+
+
+def test_update_task_sessions_rejects_inverted_interval(http_client):
+    client, ctx = http_client
+    task = ctx["task"]
+    now = datetime.datetime.utcnow()
+    resp = client.patch(
+        f"/tasks/{task.id}/sessions",
+        json={"sessions": [{
+            "started_at": now.isoformat(),
+            "ended_at": (now - datetime.timedelta(hours=1)).isoformat(),
+        }]},
+    )
+    assert resp.status_code == 422
+
+
+def test_update_task_sessions_rejects_future_times(http_client):
+    client, ctx = http_client
+    task = ctx["task"]
+    now = datetime.datetime.utcnow()
+    resp = client.patch(
+        f"/tasks/{task.id}/sessions",
+        json={"sessions": [{
+            "started_at": now.isoformat(),
+            "ended_at": (now + datetime.timedelta(hours=2)).isoformat(),
+        }]},
+    )
+    assert resp.status_code == 422

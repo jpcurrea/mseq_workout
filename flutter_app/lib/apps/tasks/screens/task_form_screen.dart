@@ -4,12 +4,22 @@ import '../models/task.dart';
 import '../services/task_api_service.dart';
 
 /// Full-screen form for creating or editing a task.
-/// Returns `true` via Navigator.pop if the task was saved.
+/// Returns `true` via Navigator.pop if the task was saved. When
+/// [returnCreatedTask] is true, creating a task instead pops the new [Task].
 class TaskFormScreen extends StatefulWidget {
   final Task? editTask;
   final int? projectId;
 
-  const TaskFormScreen({super.key, this.editTask, this.projectId});
+  /// When true and a *new* task is created, pop the created [Task] object
+  /// instead of `true` (used to insert the task into a plan).
+  final bool returnCreatedTask;
+
+  const TaskFormScreen({
+    super.key,
+    this.editTask,
+    this.projectId,
+    this.returnCreatedTask = false,
+  });
 
   @override
   State<TaskFormScreen> createState() => _TaskFormScreenState();
@@ -104,7 +114,7 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
       } else {
         final projectId = widget.projectId ?? widget.editTask?.projectId;
         if (projectId == null) throw Exception('No project selected');
-        await TaskApiService.createTask(
+        final created = await TaskApiService.createTask(
           projectId: projectId,
           title: _titleCtrl.text.trim(),
           description: _descCtrl.text.trim().isEmpty ? null : _descCtrl.text.trim(),
@@ -115,6 +125,10 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
           recurrenceRule: _isRecurring ? _recurrenceRule : null,
           tagIds: _selectedTagIds.toList(),
         );
+        if (mounted) {
+          Navigator.of(context).pop(widget.returnCreatedTask ? created : true);
+          return;
+        }
       }
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
