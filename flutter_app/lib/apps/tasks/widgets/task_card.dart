@@ -1283,13 +1283,16 @@ String formatTaskDuration(int minutes, String timeUnit) {
 /// should reflect its most-dire subtask instead of its own due date).
 String _timeLeftShortFromDate(DateTime? due) {
   if (due == null) return '—';
-  final diff = due.difference(DateTime.now());
-  if (diff.isNegative) {
-    final d = (-diff).inDays;
-    return d > 0 ? '${d}d late' : 'Late';
-  }
-  if (diff.inDays == 0) return 'Today';
-  return '${diff.inDays}d';
+  final dueLocal = due.toLocal();
+  final now = DateTime.now();
+  // Compare by calendar day, not a rolling 24-hour window, so a task due early
+  // tomorrow doesn't read as "Today" just because it's <24h away.
+  final dueDay = DateTime(dueLocal.year, dueLocal.month, dueLocal.day);
+  final today = DateTime(now.year, now.month, now.day);
+  final dayDiff = dueDay.difference(today).inDays;
+  if (dayDiff < 0) return '${-dayDiff}d late';
+  if (dayDiff == 0) return 'Today';
+  return '${dayDiff}d';
 }
 
 /// Two compact columns ("Time left" / "Duration") with small headers, shown on

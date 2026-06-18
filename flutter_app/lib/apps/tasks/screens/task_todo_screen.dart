@@ -1349,19 +1349,26 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
             labelFor: _sortModeLabel,
             onSortSelected: _setSortMode,
           ),
-          Expanded(child: _buildBody()),
-          // ── New-task button: kept directly above the AI panel so it stays
-          // reachable even when the assistant is expanded. ─────────────────
-          Align(
-            alignment: Alignment.centerRight,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(0, 4, 16, 8),
-              child: FloatingActionButton(
-                heroTag: 'todo_new_task_fab',
-                onPressed: () => _openForm(),
-                tooltip: 'New task',
-                child: const Icon(Icons.add),
-              ),
+          // ── Body with the new-task button floated over it, kept directly
+          // above the AI panel so it stays reachable even when the assistant
+          // is expanded. The button overlays the task list (rather than
+          // occupying its own full-width row) so tasks remain visible behind
+          // it instead of an opaque band. ──────────────────────────────────
+          Expanded(
+            child: Stack(
+              children: [
+                Positioned.fill(child: _buildBody()),
+                Positioned(
+                  right: 16,
+                  bottom: 8,
+                  child: FloatingActionButton(
+                    heroTag: 'todo_new_task_fab',
+                    onPressed: () => _openForm(),
+                    tooltip: 'New task',
+                    child: const Icon(Icons.add),
+                  ),
+                ),
+              ],
             ),
           ),
           // ── AI Assistant panel ────────────────────────────────────────────
