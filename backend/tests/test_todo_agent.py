@@ -44,13 +44,19 @@ def _call(name, args, *, db, user, project, dry_run=False):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestTodoToolsSchema:
-    def test_returns_four_tools(self):
+    def test_returns_five_tools(self):
         tools = _todo_tools_schema()
-        assert len(tools) == 4
+        assert len(tools) == 5
 
     def test_tool_names(self):
         names = {t["function"]["name"] for t in _todo_tools_schema()}
-        assert names == {"list_tasks", "create_task", "update_task", "delete_task"}
+        assert names == {
+            "list_tasks",
+            "create_task",
+            "update_task",
+            "delete_task",
+            "get_current_datetime",
+        }
 
     def test_no_plan_tools(self):
         names = {t["function"]["name"] for t in _todo_tools_schema()}
@@ -629,7 +635,13 @@ class TestApprovalModeDuplicationRegression:
 
     @pytest.fixture
     def mock_llm_always_calls_tool(self):
-        """LLM that always returns a create_task tool call (never a text reply)."""
+        """LLM that always returns a write_plan tool call (never a text reply).
+
+        write_plan is a mutating tool that goes through the approval queue, so
+        it exercises the early-break guard. (create_task is intentionally
+        excluded: it now executes immediately so the model gets a real id to
+        embed in the same turn, and therefore is never queued for approval.)
+        """
         call_count = [0]
 
         async def _fake_llm(messages, model="gpt-4o", tools=None, runtime=None):
@@ -641,8 +653,8 @@ class TestApprovalModeDuplicationRegression:
                     "id": f"tc_{call_count[0]:03d}",
                     "type": "function",
                     "function": {
-                        "name": "create_task",
-                        "arguments": json.dumps({"title": f"Proposed Task {call_count[0]}"}),
+                        "name": "write_plan",
+                        "arguments": json.dumps({"content": f"Plan revision {call_count[0]}"}),
                     },
                 }],
                 "_usage": {},
@@ -682,7 +694,7 @@ class TestApprovalModeDuplicationRegression:
             f"(LLM was called {call_count[0]} time(s)). "
             "The approval-mode loop likely did not break early."
         )
-        assert proposed[0]["name"] == "create_task"
+        assert proposed[0]["name"] == "write_plan"
 
     def test_planning_approval_llm_called_exactly_once_for_tool_batch(
         self, http_client, mock_llm_always_calls_tool
@@ -707,3 +719,65 @@ class TestApprovalModeDuplicationRegression:
             f"LLM was called {call_count[0]} times; expected ≤ 2 in approval mode. "
             "Approval-mode loop is not breaking early."
         )
+
+
+class TestApprovalModeImmediateCreateTask:
+    """
+    In planning + require_approval mode, create_task must execute immediately
+    (not as a dry-run) so the model gets a real task_id to embed into the plan
+    in the SAME turn. It must NOT be queued for approval, and the loop must keep
+    going so a follow-up write_plan can run.
+    """
+
+    def test_create_task_executes_immediately_under_approval(self, http_client):
+        client, ctx = http_client
+        project = ctx["project"]
+        plan = ctx["plan"]
+        db = ctx["db"]
+
+        calls = [0]
+
+        async def _fake_llm(messages, model="gpt-4o", tools=None, runtime=None):
+            calls[0] += 1
+            if calls[0] == 1:
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "tc_001",
+                        "type": "function",
+                        "function": {
+                            "name": "create_task",
+                            "arguments": json.dumps({"title": "Imported Task"}),
+                        },
+                    }],
+                    "_usage": {},
+                }
+            return {"role": "assistant", "content": "Created the task.", "_usage": {}}
+
+        with patch("routers.agent._call_llm_message", side_effect=_fake_llm):
+            resp = client.post("/agent/chat", json={
+                "mode": "planning",
+                "project_id": project.id,
+                "plan_id": plan.id,
+                "messages": [{"role": "user", "content": "Create a task"}],
+                "require_approval": True,
+            })
+
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # The task is really created (not a dry-run) and is NOT pending approval.
+        assert data["pending_approval"] is False
+        assert all(tc["name"] != "create_task" for tc in data["proposed_tool_calls"])
+        create_actions = [a for a in data["actions"] if a.get("action") == "create_task"]
+        assert len(create_actions) == 1
+        assert create_actions[0].get("dry_run") is not True
+        assert isinstance(create_actions[0].get("task_id"), int)
+
+        # The row exists in the database.
+        created = db.query(Task).filter(
+            Task.project_id == project.id, Task.title == "Imported Task"
+        ).first()
+        assert created is not None
+

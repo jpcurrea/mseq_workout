@@ -1249,7 +1249,19 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
         maxLines: null,
         expands: true,
         textAlignVertical: TextAlignVertical.top,
-        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+        style: const TextStyle(fontFamily: 'monospace', fontSize: 13, height: 1.4),
+        // Force a deterministic line-box height so the caret/tap hit-test lines
+        // up with the rendered glyphs. Without this, the 'monospace' alias
+        // resolves to fonts with different ascent/descent metrics per platform
+        // (notably on Android), so tap-to-position drifts further from the true
+        // location the lower you tap. forceStrutHeight pins each line to the
+        // strut metrics, eliminating that accumulating offset.
+        strutStyle: const StrutStyle(
+          fontFamily: 'monospace',
+          fontSize: 13,
+          height: 1.4,
+          forceStrutHeight: true,
+        ),
         decoration: const InputDecoration(
           hintText: 'Write your plan here...\n\nUse the ⊞ button to embed task widgets as {{task:ID}}.',
           border: OutlineInputBorder(),

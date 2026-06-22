@@ -126,7 +126,7 @@ def _serialize_task(task: Task, now: datetime.datetime) -> Dict[str, Any]:
         "urgency_score": _tree_urgency(task, now),
         "actual_duration_minutes": _actual_duration_minutes(task),
         "active_session_started_at": (
-            _active_session(task).started_at.isoformat()
+            _utc_iso(_active_session(task).started_at)
             if _active_session(task) else None
         ),
         "parent_task_id": task.parent_task_id,
@@ -192,6 +192,38 @@ def _to_naive_utc(dt: Optional[datetime.datetime]) -> Optional[datetime.datetime
     if dt.tzinfo is not None:
         return dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
     return dt
+
+
+def _utc_iso(dt: Optional[datetime.datetime]) -> Optional[str]:
+    """Serialize a stored (naive) UTC datetime with an explicit 'Z' suffix.
+
+    Stored work-session timestamps are real UTC instants but kept tz-naive.
+    Emitting them without a marker makes clients (e.g. Dart's DateTime.parse)
+    interpret them as *local* time, shifting them by the UTC offset. Appending
+    'Z' lets the client parse them as UTC and convert to local correctly.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return dt.isoformat() + "Z"
+
+
+def _utc_session_list(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Mark naive UTC timestamps in a stored work-session list as explicit UTC.
+
+    Covers both legacy rows (saved without a marker) and new ones, so clients
+    consistently receive UTC-aware ``started_at`` / ``ended_at`` strings.
+    """
+    out: List[Dict[str, Any]] = []
+    for entry in raw:
+        s = dict(entry)
+        for key in ("started_at", "ended_at"):
+            v = s.get(key)
+            if isinstance(v, str) and v and "Z" not in v and "+" not in v:
+                s[key] = v + "Z"
+        out.append(s)
+    return out
 
 
 def _norm_col(name: str) -> str:
@@ -642,7 +674,7 @@ async def list_completions(
             "actual_minutes": c.actual_minutes,
             "lateness_minutes": _completion_lateness_minutes(c),
             "note": c.note,
-            "work_sessions": json.loads(c.work_sessions_json) if c.work_sessions_json else [],
+            "work_sessions": _utc_session_list(json.loads(c.work_sessions_json)) if c.work_sessions_json else [],
         }
         for c in rows
     ]
@@ -713,7 +745,7 @@ def _serialize_completion(c: TaskCompletion) -> Dict[str, Any]:
         "actual_minutes": c.actual_minutes,
         "lateness_minutes": _completion_lateness_minutes(c),
         "note": c.note,
-        "work_sessions": json.loads(c.work_sessions_json) if c.work_sessions_json else [],
+        "work_sessions": _utc_session_list(json.loads(c.work_sessions_json)) if c.work_sessions_json else [],
     }
 
 
@@ -1546,8 +1578,8 @@ def _serialize_work_session(s: "WorkSession", now: datetime.datetime) -> Dict[st
     duration = round(((ended or now) - s.started_at).total_seconds() / 60.0, 2)
     return {
         "id": s.id,
-        "started_at": s.started_at.isoformat(),
-        "ended_at": ended.isoformat() if ended else None,
+        "started_at": _utc_iso(s.started_at),
+        "ended_at": _utc_iso(ended),
         "duration_minutes": duration,
         "active": ended is None,
         "notes": s.notes,

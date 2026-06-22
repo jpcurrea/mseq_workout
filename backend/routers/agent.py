@@ -522,6 +522,7 @@ YOUR ROLE
 TOOL GUIDELINES
 - Use list_tasks to answer questions ("what's due today?", "anything tagged work?") before replying.
 - For marking tasks done: call update_task with is_completed=true. For recurring tasks, tell the user to use the app's complete button so the recurrence advances correctly.
+- For any relative date ("today", "tomorrow", "next Monday"), use the current date/time provided to you (or call get_current_datetime) — never guess today's date.
 - Keep changes minimal. Don't delete tasks unless explicitly asked.
 
 STYLE
@@ -595,6 +596,21 @@ ACTIONS & APPROVAL
   NEVER use insert_task_into_plan — it only appends to the end and has been
   removed. Never reference a task id you have not seen in the project context
   or a create_task result — such tokens are rejected.
+- CREATE-THEN-EMBED — MANDATORY ORDER (do both in ONE turn, no back-and-forth):
+  When the user asks you to create tasks AND place them in a plan, you MUST:
+    1. Call create_task for EVERY new task FIRST, and WAIT for the results.
+       Each successful create_task returns the new integer "task_id".
+    2. Only AFTER you have those real task_id values, call write_plan with
+       {{{{task:ID}}}} tokens using those exact ids, placed where each task
+       belongs in the document.
+    3. Do NOT call create_task and write_plan in the same step — you cannot know
+       a task's id until create_task has returned it. Create first, read the
+       ids from the tool results, then write the plan in a later step.
+  Newly created tasks are saved immediately; the plan rewrite is the change the
+  user approves. NEVER tell the user a task was "added to the plan", "embedded",
+  or "placed" unless a write_plan call returned ok:true containing that exact
+  {{{{task:ID}}}} token. If you have created tasks but not yet written them into
+  the plan, do not stop and do not claim success — continue and call write_plan.
 
 TASK WIDGET RENDERING — CRITICAL
   Token format: {{{{task:42}}}} where 42 is the integer task id. Two opening
@@ -912,6 +928,18 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_datetime",
+                "description": (
+                    "Return the current date and time (UTC). Use this whenever you "
+                    "need to know today's date or resolve relative dates like "
+                    "'today', 'tomorrow', or 'next week'."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
     ]
 
 
@@ -945,7 +973,15 @@ def _ensure_tag_ids(
 _TASK_TOKEN_RE = re.compile(r"\{\{task:(\d+)\}\}")
 
 # Tools that only read data — they execute immediately and never require approval.
-_READ_ONLY_TOOLS = {"read_plan", "list_tasks"}
+_READ_ONLY_TOOLS = {"read_plan", "list_tasks", "get_current_datetime"}
+
+# Tools that are safe to execute immediately even in approval mode because they
+# are additive and trivially reversible. Creating a task right away (instead of
+# as a dry-run) gives the model the real task_id it needs to embed that task in
+# a plan via {task:ID} in the SAME turn — without a real id, embedding silently
+# fails and the model wrongly claims success. Plan writes, updates and deletes
+# still go through the approval queue.
+_IMMEDIATE_PLANNING_TOOLS = {"create_task"}
 
 
 def _validate_plan_task_tokens(
@@ -990,6 +1026,17 @@ def _execute_planning_tool_call(
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     _assert_can_write_project(project_id, user_id, session)
+
+    if name == "get_current_datetime":
+        now = datetime.datetime.utcnow()
+        return {
+            "ok": True,
+            "action": "get_current_datetime",
+            "utc_datetime": now.isoformat() + "Z",
+            "date": now.date().isoformat(),
+            "weekday": now.strftime("%A"),
+            "note": "Times are UTC. Task due dates are stored in UTC.",
+        }
 
     if name == "create_task":
         title = str(args.get("title", "")).strip()
@@ -1380,6 +1427,18 @@ def _todo_tools_schema() -> List[Dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_datetime",
+                "description": (
+                    "Return the current date and time (UTC). Use this whenever you "
+                    "need to know today's date or resolve relative dates like "
+                    "'today', 'tomorrow', or 'next week'."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
     ]
 
 
@@ -1502,6 +1561,15 @@ async def agent_chat(
                 else " In todo mode, be agentic: use tool calls immediately to create/update/query tasks. Keep replies short — they may be spoken aloud."
                 if body.mode == "todo"
                 else ""
+            )
+            + (
+                f"\n\nCURRENT DATE/TIME (UTC): "
+                f"{datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')} "
+                f"({datetime.datetime.utcnow().strftime('%A')}). "
+                "Treat this as 'today' when resolving relative dates (today, "
+                "tomorrow, this Friday, next week, etc.). Task due dates are "
+                "stored in UTC. You can also call get_current_datetime to "
+                "re-check the current date at any time."
             ),
         },
         {
@@ -1579,13 +1647,19 @@ async def agent_chat(
                                 body.mode == "planning"
                                 and body.require_approval
                                 and tool_name not in _READ_ONLY_TOOLS
+                                and tool_name not in _IMMEDIATE_PLANNING_TOOLS
                             ),
                         )
 
                         if body.mode == "planning" and body.require_approval:
-                            # Read-only tools don't mutate data, so they execute
-                            # immediately and never go through the approval queue.
-                            if tool_name not in _READ_ONLY_TOOLS:
+                            # Read-only and immediate tools don't go through the
+                            # approval queue: read-only tools don't mutate data,
+                            # and immediate tools (create_task) run now so the
+                            # model gets a real task_id to embed in the same turn.
+                            if (
+                                tool_name not in _READ_ONLY_TOOLS
+                                and tool_name not in _IMMEDIATE_PLANNING_TOOLS
+                            ):
                                 entry: Dict[str, Any] = {"name": tool_name, "args": parsed_args}
                                 # Include the resolved task title so the approval UI
                                 # can show names instead of raw IDs.
