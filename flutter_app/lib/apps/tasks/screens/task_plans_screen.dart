@@ -1242,32 +1242,47 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
   }
 
   Widget _buildEditor() {
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: TextField(
-        controller: _contentCtrl,
-        maxLines: null,
-        expands: true,
-        textAlignVertical: TextAlignVertical.top,
-        style: const TextStyle(fontFamily: 'monospace', fontSize: 13, height: 1.4),
-        // Force a deterministic line-box height so the caret/tap hit-test lines
-        // up with the rendered glyphs. Without this, the 'monospace' alias
-        // resolves to fonts with different ascent/descent metrics per platform
-        // (notably on Android), so tap-to-position drifts further from the true
-        // location the lower you tap. forceStrutHeight pins each line to the
-        // strut metrics, eliminating that accumulating offset.
-        strutStyle: const StrutStyle(
-          fontFamily: 'monospace',
-          fontSize: 13,
-          height: 1.4,
-          forceStrutHeight: true,
-        ),
-        decoration: const InputDecoration(
-          hintText: 'Write your plan here...\n\nUse the ⊞ button to embed task widgets as {{task:ID}}.',
-          border: OutlineInputBorder(),
-        ),
-        onChanged: (_) => setState(() => _hasChanges = true),
-      ),
+    // NOTE: We deliberately avoid `expands: true` here. When the editable's
+    // content is taller than the viewport, an expanding TextField scrolls
+    // *internally*, and on mobile its tap→text-offset mapping drifts further
+    // the lower you tap (the offset grows with distance down and only appears
+    // once the text exceeds the screen). Instead we let the field size to its
+    // content and scroll in an OUTER SingleChildScrollView, so the editable
+    // never scrolls internally and hit-testing stays accurate. `minLines` is
+    // derived from the viewport so the bordered box still fills the pane when
+    // the plan is short.
+    const lineHeightPx = 13.0 * 1.4; // fontSize * height
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final usableHeight = constraints.maxHeight - 24; // vertical padding
+        final minLines =
+            usableHeight.isFinite && usableHeight > lineHeightPx
+                ? (usableHeight / lineHeightPx).floor().clamp(1, 1000)
+                : 1;
+        return SingleChildScrollView(
+          padding: const EdgeInsets.all(12),
+          child: TextField(
+            controller: _contentCtrl,
+            maxLines: null,
+            minLines: minLines,
+            textAlignVertical: TextAlignVertical.top,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 13, height: 1.4),
+            // Force a deterministic line-box height so the caret/tap hit-test
+            // lines up with the rendered glyphs across platforms.
+            strutStyle: const StrutStyle(
+              fontFamily: 'monospace',
+              fontSize: 13,
+              height: 1.4,
+              forceStrutHeight: true,
+            ),
+            decoration: const InputDecoration(
+              hintText: 'Write your plan here...\n\nUse the ⊞ button to embed task widgets as {{task:ID}}.',
+              border: OutlineInputBorder(),
+            ),
+            onChanged: (_) => setState(() => _hasChanges = true),
+          ),
+        );
+      },
     );
   }
 
