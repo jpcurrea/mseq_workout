@@ -14,11 +14,20 @@ class TaskFormScreen extends StatefulWidget {
   /// instead of `true` (used to insert the task into a plan).
   final bool returnCreatedTask;
 
+  /// Seed values for creating a brand-new task (used to pre-fill the "Final
+  /// Task" child after saving a parent). Ignored when [editTask] is provided.
+  final String? initialTitle;
+  final int? initialDurationMinutes;
+  final int? initialParentTaskId;
+
   const TaskFormScreen({
     super.key,
     this.editTask,
     this.projectId,
     this.returnCreatedTask = false,
+    this.initialTitle,
+    this.initialDurationMinutes,
+    this.initialParentTaskId,
   });
 
   @override
@@ -30,10 +39,12 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
   late final TextEditingController _titleCtrl;
   late final TextEditingController _descCtrl;
   late final TextEditingController _durationCtrl;
+  late final TextEditingController _finalTaskCtrl;
 
   DateTime? _dueDate;
   bool _isRecurring = false;
   String? _recurrenceRule;
+  bool _inheritDuration = false;
   List<Tag> _allTags = [];
   Set<int> _selectedTagIds = {};
   List<Task> _allTasks = [];
@@ -42,19 +53,30 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
 
   bool get _isEditing => widget.editTask != null;
 
+  /// Whether the edited task already has subtasks (parent-only UI is shown).
+  bool get _hasSubtasks => widget.editTask?.subtasks.isNotEmpty ?? false;
+
+  /// Sum of the immediate subtasks' (already rolled-up) durations.
+  int get _subtaskDurationSum =>
+      (widget.editTask?.subtasks ?? const <Task>[])
+          .fold(0, (s, t) => s + (t.durationMinutes ?? 0));
+
   @override
   void initState() {
     super.initState();
     final t = widget.editTask;
-    _titleCtrl = TextEditingController(text: t?.title ?? '');
+    _titleCtrl = TextEditingController(text: t?.title ?? widget.initialTitle ?? '');
     _descCtrl = TextEditingController(text: t?.description ?? '');
+    final initialDuration = t?.ownDurationMinutes ?? t?.durationMinutes ?? widget.initialDurationMinutes;
     _durationCtrl = TextEditingController(
-        text: t?.durationMinutes != null ? t!.durationMinutes.toString() : '');
+        text: initialDuration != null ? initialDuration.toString() : '');
+    _finalTaskCtrl = TextEditingController();
     _dueDate = t?.dueDate;
     _isRecurring = t?.isRecurring ?? false;
     _recurrenceRule = t?.recurrenceRule;
+    _inheritDuration = t?.inheritSubtaskDuration ?? false;
     _selectedTagIds = Set.from(t?.tags.map((tag) => tag.id) ?? []);
-    _parentTaskId = t?.parentTaskId;
+    _parentTaskId = t?.parentTaskId ?? widget.initialParentTaskId;
     _loadData();
   }
 
@@ -63,6 +85,7 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
     _titleCtrl.dispose();
     _descCtrl.dispose();
     _durationCtrl.dispose();
+    _finalTaskCtrl.dispose();
     super.dispose();
   }
 
@@ -95,8 +118,13 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _isSaving = true);
 
-    final durationMin = int.tryParse(_durationCtrl.text.trim());
+    final inheritOn = _hasSubtasks && _inheritDuration;
+    // When inheriting, the duration is derived from subtasks — leave the stored
+    // own-duration untouched rather than overwriting it with the summed value.
+    final durationMin = inheritOn ? null : int.tryParse(_durationCtrl.text.trim());
     final dueDateStr = _dueDate?.toIso8601String();
+    final finalTaskDuration =
+        _hasSubtasks ? (int.tryParse(_finalTaskCtrl.text.trim()) ?? 0) : 0;
 
     try {
       if (_isEditing) {
@@ -109,8 +137,22 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
           parentTaskId: _parentTaskId,
           isRecurring: _isRecurring,
           recurrenceRule: _isRecurring ? _recurrenceRule : null,
+          inheritSubtaskDuration: _hasSubtasks ? _inheritDuration : null,
           tagIds: _selectedTagIds.toList(),
         );
+        // Seed a "Final Task" child by opening a pre-filled create form.
+        if (finalTaskDuration > 0 && mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => TaskFormScreen(
+                projectId: widget.editTask!.projectId,
+                initialTitle: 'Final Task',
+                initialDurationMinutes: finalTaskDuration,
+                initialParentTaskId: widget.editTask!.id,
+              ),
+            ),
+          );
+        }
       } else {
         final projectId = widget.projectId ?? widget.editTask?.projectId;
         if (projectId == null) throw Exception('No project selected');
@@ -242,20 +284,64 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
             ),
             const SizedBox(height: 12),
 
-            TextFormField(
-              controller: _durationCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Estimated duration (minutes)',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.timer_outlined),
+            // Inherit-duration toggle (parents only)
+            if (_hasSubtasks)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Inherit duration from subtasks'),
+                subtitle: const Text('Parent duration = sum of subtask durations'),
+                value: _inheritDuration,
+                onChanged: (v) => setState(() => _inheritDuration = v),
               ),
-              keyboardType: TextInputType.number,
-              validator: (v) {
-                if (v == null || v.trim().isEmpty) return null;
-                if (int.tryParse(v.trim()) == null) return 'Enter a number';
-                return null;
-              },
-            ),
+
+            (_hasSubtasks && _inheritDuration)
+                ? TextFormField(
+                    key: const ValueKey('duration-locked'),
+                    readOnly: true,
+                    enabled: false,
+                    initialValue: _subtaskDurationSum.toString(),
+                    decoration: const InputDecoration(
+                      labelText: 'Estimated duration (minutes)',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.timer_outlined),
+                      helperText: 'Locked — summed from subtasks',
+                    ),
+                  )
+                : TextFormField(
+                    key: const ValueKey('duration-editable'),
+                    controller: _durationCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Estimated duration (minutes)',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.timer_outlined),
+                    ),
+                    keyboardType: TextInputType.number,
+                    validator: (v) {
+                      if (v == null || v.trim().isEmpty) return null;
+                      if (int.tryParse(v.trim()) == null) return 'Enter a number';
+                      return null;
+                    },
+                  ),
+
+            // Final-task seeding field (parents only)
+            if (_hasSubtasks) ...[
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _finalTaskCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Final task duration (minutes)',
+                  helperText: 'Optional — creates a "Final Task" subtask on save',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.flag_outlined),
+                ),
+                keyboardType: TextInputType.number,
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) return null;
+                  if (int.tryParse(v.trim()) == null) return 'Enter a number';
+                  return null;
+                },
+              ),
+            ],
             const SizedBox(height: 16),
 
             // Tags

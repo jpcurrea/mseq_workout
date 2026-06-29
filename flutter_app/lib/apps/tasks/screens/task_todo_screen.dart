@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
@@ -10,21 +8,9 @@ import '../models/project.dart';
 import '../services/task_api_service.dart';
 import '../services/project_api_service.dart';
 import '../services/agent_api_service.dart';
-import '../widgets/task_card.dart';
+import '../widgets/task_list_view.dart';
 import '../widgets/agent_chat_panel.dart';
 import 'task_form_screen.dart';
-
-/// How the top-level task list is ordered in the todo view.
-enum TaskSortMode {
-  /// Least time until the due date first (most urgent).
-  timeLeft,
-  /// Longest estimated duration first.
-  duration,
-  /// Soonest due date first.
-  dueDate,
-  /// Time left divided by duration — lowest (most dire) first.
-  direness,
-}
 
 class TaskTodoScreen extends StatefulWidget {
   const TaskTodoScreen({super.key});
@@ -41,19 +27,15 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
   bool _isLoading = true;
   String? _error;
   bool _noProjects = false;
-  final Set<int> _selectedTagIds = {};
   bool _showCompleted = false;
   final Set<int> _activeSessions = {};
   final Set<int> _completingTaskIds = {};
   String _timeUnit = 'hours';
   bool _agentRequireApproval = true;
-  bool _expandAll = false;
-  bool _flatView = false;
-  TaskSortMode _sortMode = TaskSortMode.timeLeft;
 
-  // ── Search state ────────────────────────────────────────────────────────────
-  final TextEditingController _searchCtrl = TextEditingController();
-  String _searchQuery = '';
+  /// The currently displayed (filtered + sorted) task list, mirrored from the
+  /// embedded [TaskListView] so selection-mode "select all" can operate on it.
+  List<Task> _visibleTasks = [];
 
   // ── Multi-select state ──────────────────────────────────────────────────────
   bool _selectionMode = false;
@@ -78,20 +60,12 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     setState(() {
       _timeUnit = prefs.getString('task_time_unit') ?? 'hours';
       _agentRequireApproval = prefs.getBool('task_agent_require_approval') ?? true;
-      _expandAll = prefs.getBool('task_expand_all') ?? false;
-      _flatView = prefs.getBool('task_flat_view') ?? false;
-      final sortName = prefs.getString('task_sort_mode');
-      _sortMode = TaskSortMode.values.firstWhere(
-        (m) => m.name == sortName,
-        orElse: () => TaskSortMode.timeLeft,
-      );
     });
   }
 
   @override
   void dispose() {
     _agentScrollCtrl.dispose();
-    _searchCtrl.dispose();
     super.dispose();
   }
 
@@ -509,208 +483,25 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
     Navigator.of(context).pushNamed(route);
   }
 
-  Future<void> _setExpandAll(bool value) async {
-    setState(() => _expandAll = value);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('task_expand_all', value);
-  }
-
-  Future<void> _setFlatView(bool value) async {
-    setState(() => _flatView = value);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('task_flat_view', value);
-  }
-
-  String _sortModeLabel(TaskSortMode mode) {
-    switch (mode) {
-      case TaskSortMode.timeLeft: return 'Time left (most urgent)';
-      case TaskSortMode.duration: return 'Duration (longest first)';
-      case TaskSortMode.dueDate:  return 'Due date (soonest first)';
-      case TaskSortMode.direness: return 'Direness (time left ÷ duration)';
-    }
-  }
-
-  Future<void> _setSortMode(TaskSortMode mode) async {
-    setState(() => _sortMode = mode);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('task_sort_mode', mode.name);
-  }
-
-  // ── Sorting / filtering helpers ─────────────────────────────────────────────
-
-  bool get _sortAscending => _sortMode != TaskSortMode.duration;
-
-  /// "Direness" = remaining time relative to the work required.
-  /// Lower (or negative) = more dire. Null when due date or duration is missing.
-  double? _direness(Task t, DateTime now) {
-    if (t.dueDate == null || t.durationMinutes == null || t.durationMinutes! <= 0) {
-      return null;
-    }
-    return t.dueDate!.difference(now).inMinutes / t.durationMinutes!;
-  }
-
-  /// The raw metric for a single task under the active sort mode (null if N/A).
-  num? _metric(Task t, DateTime now) {
-    switch (_sortMode) {
-      case TaskSortMode.timeLeft: return t.dueDate?.difference(now).inMinutes;
-      case TaskSortMode.duration: return t.durationMinutes;
-      case TaskSortMode.dueDate:  return t.dueDate?.millisecondsSinceEpoch;
-      case TaskSortMode.direness: return _direness(t, now);
-    }
-  }
-
-  int _cmpNullable(num? a, num? b) {
-    if (a == null && b == null) return 0;
-    if (a == null) return 1; // nulls last
-    if (b == null) return -1;
-    return _sortAscending ? a.compareTo(b) : b.compareTo(a);
-  }
-
-  /// The "most prominent" metric across a task and all its descendants,
-  /// i.e. the value that would sort first under the current mode.
-  num? _representativeMetric(Task t, DateTime now) {
-    num? best;
-    void visit(Task x) {
-      final m = _metric(x, now);
-      if (m != null) {
-        if (best == null) {
-          best = m;
-        } else {
-          best = _sortAscending ? math.min(best!, m) : math.max(best!, m);
-        }
-      }
-      for (final s in x.subtasks) {
-        visit(s);
-      }
-    }
-    visit(t);
-    return best;
-  }
-
-  /// Comparator that orders individual tasks by their own metric.
-  Comparator<Task> get _taskComparator {
-    final now = DateTime.now();
-    return (a, b) => _cmpNullable(_metric(a, now), _metric(b, now));
-  }
-
-  bool _matchesTagFilter(Task t) {
-    if (_selectedTagIds.isEmpty) return true;
-    return t.tags.any((tag) => _selectedTagIds.contains(tag.id));
-  }
-
-  bool _treeMatchesTagFilter(Task t) {
-    if (_matchesTagFilter(t)) return true;
-    return t.subtasks.any(_treeMatchesTagFilter);
-  }
-
-  // ── Search matching ─────────────────────────────────────────────────────────
-
-  /// All searchable text for a task, lower-cased: title, description, tag
-  /// names, and the due date (both MM-DD-YY and the relative label).
-  String _searchHaystack(Task t) {
-    final parts = <String>[
-      t.title,
-      t.description ?? '',
-      ...t.tags.map((tag) => tag.name),
-    ];
-    if (t.dueDate != null) {
-      final d = t.dueDate!;
-      parts.add(
-        '${d.month.toString().padLeft(2, '0')}-'
-        '${d.day.toString().padLeft(2, '0')}-'
-        '${(d.year % 100).toString().padLeft(2, '0')}',
+  /// Persist a new manual order after a drag inside the embedded list.
+  Future<void> _reorderTasks(List<int> orderedIds) async {
+    if (_activeProject == null) return;
+    try {
+      await TaskApiService.reorderTasks(
+        projectId: _activeProject!.id,
+        orderedIds: orderedIds,
       );
-      parts.add(t.dueDateLabel);
+      await _quietRefreshTasks();
+    } catch (e) {
+      _showError(e.toString());
     }
-    return parts.join(' ').toLowerCase();
   }
 
-  /// Tokenize the query into terms and AND/OR operators. Double-quoted spans
-  /// become a single phrase term (operators inside quotes are literal text).
-  List<_SearchToken> _tokenizeSearch(String query) {
-    final tokens = <_SearchToken>[];
-    final buf = StringBuffer();
-    bool inQuotes = false;
-    bool quoted = false; // current buffer originated from a quoted span
-
-    void flush() {
-      final text = buf.toString();
-      buf.clear();
-      if (text.isEmpty) {
-        if (quoted) tokens.add(const _SearchToken.term('')); // keep empty? skip
-        quoted = false;
-        return;
-      }
-      if (!quoted) {
-        final upper = text.toUpperCase();
-        if (upper == 'AND') { tokens.add(const _SearchToken.op('AND')); quoted = false; return; }
-        if (upper == 'OR') { tokens.add(const _SearchToken.op('OR')); quoted = false; return; }
-      }
-      tokens.add(_SearchToken.term(text.toLowerCase()));
-      quoted = false;
-    }
-
-    for (final rune in query.runes) {
-      final ch = String.fromCharCode(rune);
-      if (ch == '"') {
-        if (inQuotes) { inQuotes = false; flush(); }
-        else { flush(); inQuotes = true; quoted = true; }
-      } else if (!inQuotes && ch.trim().isEmpty) {
-        flush();
-      } else {
-        buf.write(ch);
-      }
-    }
-    flush();
-    return tokens.where((t) => !(t.isTerm && t.value.isEmpty)).toList();
-  }
-
-  /// True if [haystack] satisfies the query. Empty query matches everything.
-  /// Semantics: OR-of-ANDs — explicit AND binds tighter than OR; adjacent
-  /// terms with no operator default to OR.
-  bool _searchMatches(String haystack, List<_SearchToken> tokens) {
-    if (tokens.isEmpty) return true;
-    final groups = <List<String>>[];
-    var current = <String>[];
-    var pendingOp = 'OR';
-    for (final tok in tokens) {
-      if (tok.isOp) {
-        pendingOp = tok.value;
-        continue;
-      }
-      if (current.isEmpty) {
-        current.add(tok.value);
-      } else if (pendingOp == 'AND') {
-        current.add(tok.value);
-      } else {
-        groups.add(current);
-        current = [tok.value];
-      }
-      pendingOp = 'OR';
-    }
-    if (current.isNotEmpty) groups.add(current);
-    if (groups.isEmpty) return true;
-    // Match if any AND-group is fully satisfied.
-    return groups.any((group) => group.every(haystack.contains));
-  }
-
-  bool _matchesSearch(Task t) {
-    final tokens = _tokenizeSearch(_searchQuery);
-    if (tokens.isEmpty) return true;
-    return _searchMatches(_searchHaystack(t), tokens);
-  }
-
-  bool _treeMatchesSearch(Task t) {
-    if (_searchQuery.trim().isEmpty) return true;
-    if (_matchesSearch(t)) return true;
-    return t.subtasks.any(_treeMatchesSearch);
-  }
-
-  void _flatten(Task t, List<Task> out) {
-    out.add(t);
-    for (final s in t.subtasks) {
-      _flatten(s, out);
-    }
+  /// Mirrors the embedded list's current displayed tasks so selection-mode
+  /// "select all" can operate on exactly what the user sees.
+  void _onDisplayedTasksChanged(List<Task> tasks) {
+    if (!mounted) return;
+    setState(() => _visibleTasks = tasks);
   }
 
   /// Collect the ids of every task (at any depth) with an active work session.
@@ -726,31 +517,6 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
       visit(t);
     }
     return ids;
-  }
-
-  /// The task list to render given the active view + sort + tag filter.
-  /// In grouped mode: top-level tasks sorted by their most-dire descendant.
-  /// In flat mode: every task (all levels) sorted individually.
-  List<Task> get _displayTasks {
-    final now = DateTime.now();
-    if (_flatView) {
-      final all = <Task>[];
-      for (final t in _tasks) {
-        _flatten(t, all);
-      }
-      final filtered =
-          all.where((t) => _matchesTagFilter(t) && _matchesSearch(t)).toList();
-      filtered.sort((a, b) => _cmpNullable(_metric(a, now), _metric(b, now)));
-      return filtered;
-    }
-    final roots = _tasks
-        .where((t) => _treeMatchesTagFilter(t) && _treeMatchesSearch(t))
-        .toList();
-    roots.sort((a, b) => _cmpNullable(
-          _representativeMetric(a, now),
-          _representativeMetric(b, now),
-        ));
-    return roots;
   }
 
   Future<void> _showSettings() async {
@@ -1205,18 +971,6 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
       ),
       actions: [
         IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
-        IconButton(
-          icon: Icon(_flatView ? Icons.view_list : Icons.account_tree),
-          tooltip: _flatView
-              ? 'Flat view (all tasks individually)'
-              : 'Grouped view (subtasks nested)',
-          onPressed: () => _setFlatView(!_flatView),
-        ),
-        IconButton(
-          icon: Icon(_expandAll ? Icons.unfold_less : Icons.unfold_more),
-          tooltip: _expandAll ? 'Collapse all' : 'Expand all',
-          onPressed: () => _setExpandAll(!_expandAll),
-        ),
         PopupMenuButton<String>(
           icon: const Icon(Icons.menu),
           onSelected: (v) {
@@ -1288,22 +1042,22 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
         // Select-all / deselect-all
         IconButton(
           icon: Icon(
-            _selectedTaskIds.length == _displayTasks.length
+            _selectedTaskIds.length == _visibleTasks.length
                 ? Icons.deselect
                 : Icons.select_all,
           ),
-          tooltip: _selectedTaskIds.length == _displayTasks.length
+          tooltip: _selectedTaskIds.length == _visibleTasks.length
               ? 'Deselect all'
               : 'Select all',
           onPressed: () {
             setState(() {
-              if (_selectedTaskIds.length == _displayTasks.length) {
+              if (_selectedTaskIds.length == _visibleTasks.length) {
                 _selectedTaskIds.clear();
                 _selectionMode = false;
               } else {
                 _selectedTaskIds
                   ..clear()
-                  ..addAll(_displayTasks.map((t) => t.id));
+                  ..addAll(_visibleTasks.map((t) => t.id));
               }
             });
           },
@@ -1318,37 +1072,6 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
       appBar: _selectionMode ? _buildSelectionAppBar() : _buildNormalAppBar(),
       body: Column(
         children: [
-          // Search bar
-          _SearchBar(
-            controller: _searchCtrl,
-            onChanged: (v) => setState(() => _searchQuery = v),
-            onClear: () => setState(() {
-              _searchCtrl.clear();
-              _searchQuery = '';
-            }),
-          ),
-          // Tag filter + completed toggle
-          _FilterBar(
-            tags: _tags,
-            selectedTagIds: _selectedTagIds,
-            showCompleted: _showCompleted,
-            onTagsChanged: (ids) {
-              setState(() {
-                _selectedTagIds
-                  ..clear()
-                  ..addAll(ids);
-              });
-            },
-            onToggleCompleted: (val) {
-              setState(() => _showCompleted = val);
-              _load();
-            },
-          ),
-          _SortBar(
-            sortMode: _sortMode,
-            labelFor: _sortModeLabel,
-            onSortSelected: _setSortMode,
-          ),
           // ── Body with the new-task button floated over it, kept directly
           // above the AI panel so it stays reachable even when the assistant
           // is expanded. The button overlays the task list (rather than
@@ -1460,91 +1183,32 @@ class _TaskTodoScreenState extends State<TaskTodoScreen> {
         ),
       );
     }
-    return RefreshIndicator(
+    return TaskListView(
+      tasks: _tasks,
+      tags: _tags,
+      activeSessions: _activeSessions,
+      timeUnit: _timeUnit,
+      showCompleted: _showCompleted,
+      onToggleCompleted: (val) {
+        setState(() => _showCompleted = val);
+        _load();
+      },
+      onComplete: _toggleComplete,
+      onSkip: _skipTask,
+      onEdit: (t) => _openForm(task: t),
+      onDelete: _deleteTask,
+      onStartSession: _startSession,
+      onStopSession: _stopSession,
+      onRestartSession: _restartSession,
+      onReorder: _reorderTasks,
       onRefresh: _load,
-      child: Builder(
-        builder: (_) {
-          final sorted = _displayTasks;
-          if (sorted.isEmpty) {
-            return ListView(
-              padding: const EdgeInsets.all(32),
-              children: const [
-                SizedBox(height: 80),
-                Icon(Icons.filter_alt_off, size: 56, color: Colors.grey),
-                SizedBox(height: 16),
-                Center(
-                  child: Text('No tasks match the current filters',
-                      style: TextStyle(color: Colors.grey)),
-                ),
-              ],
-            );
-          }
-          final subtaskSort = _taskComparator;
-          return ListView.builder(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            itemCount: sorted.length,
-            itemBuilder: (_, i) {
-              final task = sorted[i];
-              final isSelected = _selectedTaskIds.contains(task.id);
-              final cardTree = TaskCardTree(
-                task: task,
-                activeSessions: {for (final id in _activeSessions) id: true},
-                expandAll: _expandAll,
-                renderSubtasks: !_flatView,
-                subtaskSort: subtaskSort,
-                timeUnit: _timeUnit,
-                onComplete: _selectionMode ? null : _toggleComplete,
-                onSkip: _selectionMode ? null : _skipTask,
-                onEdit: _selectionMode ? null : (t) => _openForm(task: t),
-                onDelete: _selectionMode ? null : _deleteTask,
-                onStartSession: _selectionMode ? null : _startSession,
-                onStopSession: _selectionMode ? null : _stopSession,
-                onRestartSession: _selectionMode ? null : _restartSession,
-              );
-              return GestureDetector(
-                onLongPress: _selectionMode ? null : () => _enterSelectionMode(task.id),
-                onTap: _selectionMode ? () => _toggleTaskSelection(task.id) : null,
-                child: _TaskCompletionWrapper(
-                  key: ValueKey(task.id),
-                  completing: _completingTaskIds.contains(task.id),
-                  onDismissed: () => _onCompletionAnimationDone(task.id),
-                  child: _selectionMode
-                      ? Stack(
-                          children: [
-                            // Tint when selected
-                            if (isSelected)
-                              Positioned.fill(
-                                child: IgnorePointer(
-                                  child: DecoratedBox(
-                                    decoration: BoxDecoration(
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .primary
-                                          .withValues(alpha: 0.12),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                Checkbox(
-                                  value: isSelected,
-                                  onChanged: (_) => _toggleTaskSelection(task.id),
-                                ),
-                                Expanded(child: cardTree),
-                              ],
-                            ),
-                          ],
-                        )
-                      : cardTree,
-                ),
-              );
-            },
-          );
-        },
-      ),
+      selectionMode: _selectionMode,
+      selectedTaskIds: _selectedTaskIds,
+      onEnterSelection: _enterSelectionMode,
+      onToggleSelection: _toggleTaskSelection,
+      completingTaskIds: _completingTaskIds,
+      onCompletionDone: _onCompletionAnimationDone,
+      onDisplayedTasksChanged: _onDisplayedTasksChanged,
     );
   }
 }
@@ -1837,413 +1501,7 @@ class _BatchEditDialogState extends State<_BatchEditDialog> {
   }
 }
 
-// ── Completion exit animation ──────────────────────────────────────────────────
-
-/// Wraps a task list item. When [completing] flips to true it plays a brief
-/// green flash followed by a fade + height-collapse, then calls [onDismissed]
-/// so the parent can remove the task from state.
-class _TaskCompletionWrapper extends StatefulWidget {
-  final bool completing;
-  final VoidCallback? onDismissed;
-  final Widget child;
-
-  const _TaskCompletionWrapper({
-    super.key,
-    required this.completing,
-    required this.child,
-    this.onDismissed,
-  });
-
-  @override
-  State<_TaskCompletionWrapper> createState() => _TaskCompletionWrapperState();
-}
-
-class _TaskCompletionWrapperState extends State<_TaskCompletionWrapper>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 700),
-  );
-
-  // Green overlay: ramps up to 20% opacity in first 20%, gone by 45%.
-  late final Animation<double> _flash = TweenSequence<double>([
-    TweenSequenceItem(tween: Tween(begin: 0.0, end: 0.20), weight: 20),
-    TweenSequenceItem(tween: Tween(begin: 0.20, end: 0.0), weight: 25),
-    TweenSequenceItem(tween: ConstantTween(0.0), weight: 55),
-  ]).animate(_ctrl);
-
-  // Content fades out from t=40% to t=100%.
-  late final Animation<double> _fade = TweenSequence<double>([
-    TweenSequenceItem(tween: ConstantTween(1.0), weight: 40),
-    TweenSequenceItem(tween: Tween(begin: 1.0, end: 0.0), weight: 60),
-  ]).animate(_ctrl);
-
-  // Height collapses from t=50% to t=100%.
-  late final Animation<double> _size = TweenSequence<double>([
-    TweenSequenceItem(tween: ConstantTween(1.0), weight: 50),
-    TweenSequenceItem(
-      tween: Tween(begin: 1.0, end: 0.0).chain(CurveTween(curve: Curves.easeInOut)),
-      weight: 50,
-    ),
-  ]).animate(_ctrl);
-
-  @override
-  void didUpdateWidget(_TaskCompletionWrapper old) {
-    super.didUpdateWidget(old);
-    if (widget.completing && !old.completing) {
-      _ctrl.forward().whenComplete(() => widget.onDismissed?.call());
-    }
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _ctrl,
-      child: widget.child,
-      builder: (context, child) => SizeTransition(
-        sizeFactor: _size,
-        axisAlignment: -1.0,
-        child: Opacity(
-          opacity: _fade.value,
-          child: Stack(
-            children: [
-              child!,
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Colors.green.withValues(alpha: _flash.value),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// A single token in a parsed search query: either a search term or a
-/// boolean operator ("AND" / "OR").
-class _SearchToken {
-  final bool isOp;
-  final String value;
-
-  const _SearchToken.term(this.value) : isOp = false;
-  const _SearchToken.op(this.value) : isOp = true;
-
-  bool get isTerm => !isOp;
-}
-
-/// Search bar shown at the top of the todo list. Supports general searches plus
-/// quoted "phrases" and AND/OR operators.
-class _SearchBar extends StatelessWidget {
-  final TextEditingController controller;
-  final ValueChanged<String> onChanged;
-  final VoidCallback onClear;
-
-  const _SearchBar({
-    required this.controller,
-    required this.onChanged,
-    required this.onClear,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      child: TextField(
-        controller: controller,
-        onChanged: onChanged,
-        textInputAction: TextInputAction.search,
-        decoration: InputDecoration(
-          isDense: true,
-          hintText: 'Search title, description, tags, dates…',
-          prefixIcon: const Icon(Icons.search, size: 20),
-          suffixIcon: controller.text.isEmpty
-              ? Tooltip(
-                  message: 'Use "quotes" for phrases and AND / OR for advanced queries',
-                  child: Icon(Icons.info_outline, size: 18, color: Colors.grey[500]),
-                )
-              : IconButton(
-                  icon: const Icon(Icons.clear, size: 18),
-                  tooltip: 'Clear search',
-                  onPressed: onClear,
-                ),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        ),
-      ),
-    );
-  }
-}
-
-class _SortBar extends StatelessWidget {  final TaskSortMode sortMode;
-  final String Function(TaskSortMode) labelFor;
-  final void Function(TaskSortMode) onSortSelected;
-  const _SortBar({
-    required this.sortMode,
-    required this.labelFor,
-    required this.onSortSelected,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Theme.of(context).colorScheme.surface,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-      child: Row(
-        children: [
-          const Icon(Icons.sort, size: 18),
-          const SizedBox(width: 8),
-          const Text('Sort by', style: TextStyle(fontSize: 13)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: DropdownButton<TaskSortMode>(
-              value: sortMode,
-              isExpanded: true,
-              isDense: true,
-              underline: const SizedBox.shrink(),
-              onChanged: (mode) {
-                if (mode != null) onSortSelected(mode);
-              },
-              items: TaskSortMode.values
-                  .map((m) => DropdownMenuItem(
-                        value: m,
-                        child: Text(labelFor(m), style: const TextStyle(fontSize: 13)),
-                      ))
-                  .toList(),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _FilterBar extends StatelessWidget {
-  final List<Tag> tags;
-  final Set<int> selectedTagIds;
-  final bool showCompleted;
-  final void Function(Set<int>) onTagsChanged;
-  final void Function(bool) onToggleCompleted;
-
-  const _FilterBar({
-    required this.tags,
-    required this.selectedTagIds,
-    required this.showCompleted,
-    required this.onTagsChanged,
-    required this.onToggleCompleted,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Theme.of(context).colorScheme.surface,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: Row(
-        children: [
-          Expanded(
-            child: _TagFilterDropdown(
-              tags: tags,
-              selectedTagIds: selectedTagIds,
-              onChanged: onTagsChanged,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('Done', style: TextStyle(fontSize: 12)),
-              Switch(
-                value: showCompleted,
-                onChanged: onToggleCompleted,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// A dropdown button that opens a searchable, multi-select checkbox list of tags.
-class _TagFilterDropdown extends StatelessWidget {
-  final List<Tag> tags;
-  final Set<int> selectedTagIds;
-  final void Function(Set<int>) onChanged;
-
-  const _TagFilterDropdown({
-    required this.tags,
-    required this.selectedTagIds,
-    required this.onChanged,
-  });
-
-  String _buttonLabel() {
-    if (selectedTagIds.isEmpty) return 'All tags';
-    if (selectedTagIds.length == 1) {
-      final match = tags.where((t) => t.id == selectedTagIds.first);
-      if (match.isNotEmpty) return match.first.name;
-    }
-    return '${selectedTagIds.length} tags';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: OutlinedButton.icon(
-        icon: const Icon(Icons.filter_list, size: 18),
-        label: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(_buttonLabel()),
-            const Icon(Icons.arrow_drop_down, size: 20),
-          ],
-        ),
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          visualDensity: VisualDensity.compact,
-        ),
-        onPressed: tags.isEmpty
-            ? null
-            : () async {
-                final result = await showModalBottomSheet<Set<int>>(
-                  context: context,
-                  isScrollControlled: true,
-                  builder: (_) => _TagFilterSheet(
-                    tags: tags,
-                    selectedTagIds: selectedTagIds,
-                  ),
-                );
-                if (result != null) onChanged(result);
-              },
-      ),
-    );
-  }
-}
-
-/// Bottom-sheet content with a search field + checkbox list for tag selection.
-class _TagFilterSheet extends StatefulWidget {
-  final List<Tag> tags;
-  final Set<int> selectedTagIds;
-
-  const _TagFilterSheet({required this.tags, required this.selectedTagIds});
-
-  @override
-  State<_TagFilterSheet> createState() => _TagFilterSheetState();
-}
-
-class _TagFilterSheetState extends State<_TagFilterSheet> {
-  late final Set<int> _selected = {...widget.selectedTagIds};
-  String _query = '';
-
-  @override
-  Widget build(BuildContext context) {
-    final filtered = widget.tags
-        .where((t) => t.name.toLowerCase().contains(_query.toLowerCase()))
-        .toList();
-    return Padding(
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom,
-      ),
-      child: SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Text('Filter by tags',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  ),
-                  if (_selected.isNotEmpty)
-                    TextButton(
-                      onPressed: () => setState(_selected.clear),
-                      child: const Text('Clear'),
-                    ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
-                autofocus: true,
-                decoration: const InputDecoration(
-                  prefixIcon: Icon(Icons.search),
-                  hintText: 'Search tags…',
-                  isDense: true,
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (v) => setState(() => _query = v),
-              ),
-            ),
-            const SizedBox(height: 4),
-            Flexible(
-              child: filtered.isEmpty
-                  ? const Padding(
-                      padding: EdgeInsets.all(24),
-                      child: Text('No matching tags',
-                          style: TextStyle(color: Colors.grey)),
-                    )
-                  : ListView(
-                      shrinkWrap: true,
-                      children: filtered
-                          .map((tag) => CheckboxListTile(
-                                dense: true,
-                                value: _selected.contains(tag.id),
-                                title: Text(tag.name),
-                                secondary: CircleAvatar(
-                                  radius: 8,
-                                  backgroundColor: tag.flutterColor,
-                                ),
-                                onChanged: (checked) => setState(() {
-                                  if (checked == true) {
-                                    _selected.add(tag.id);
-                                  } else {
-                                    _selected.remove(tag.id);
-                                  }
-                                }),
-                              ))
-                          .toList(),
-                    ),
-            ),
-            const Divider(height: 1),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: () => Navigator.pop(context, _selected),
-                    child: const Text('Apply'),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
+// ── Project switcher placeholder removed (now in task_list_view.dart) ─────────
 
 // ── Project switcher bottom sheet ─────────────────────────────────────────────
 

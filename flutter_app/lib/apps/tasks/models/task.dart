@@ -28,6 +28,8 @@ class Task {
   final String? description;
   final DateTime? dueDate;
   final int? durationMinutes;
+  final int? ownDurationMinutes;   // raw stored duration (before subtask roll-up)
+  final bool inheritSubtaskDuration;  // parent derives duration from subtasks
   final DateTime? startBy;        // computed by backend
   final bool isCompleted;
   final DateTime? completedAt;
@@ -40,6 +42,7 @@ class Task {
   final double? actualDurationMinutes;
   final DateTime? activeSessionStartedAt;  // non-null while a work session is running
   final int? parentTaskId;
+  final double? sortOrder;        // manual ordering position (null = unset)
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -50,6 +53,8 @@ class Task {
     this.description,
     this.dueDate,
     this.durationMinutes,
+    this.ownDurationMinutes,
+    this.inheritSubtaskDuration = false,
     this.startBy,
     required this.isCompleted,
     this.completedAt,
@@ -62,6 +67,7 @@ class Task {
     this.actualDurationMinutes,
     this.activeSessionStartedAt,
     this.parentTaskId,
+    this.sortOrder,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -73,6 +79,8 @@ class Task {
         description: json['description'],
         dueDate: json['due_date'] != null ? DateTime.parse(json['due_date']) : null,
         durationMinutes: json['duration_minutes'],
+        ownDurationMinutes: json['own_duration_minutes'],
+        inheritSubtaskDuration: json['inherit_subtask_duration'] ?? false,
         startBy: json['start_by'] != null ? DateTime.parse(json['start_by']) : null,
         isCompleted: json['is_completed'] ?? false,
         completedAt: json['completed_at'] != null ? DateTime.parse(json['completed_at']) : null,
@@ -87,6 +95,7 @@ class Task {
             ? DateTime.parse(json['active_session_started_at'])
             : null,
         parentTaskId: json['parent_task_id'],
+        sortOrder: (json['sort_order'] as num?)?.toDouble(),
         createdAt: DateTime.parse(json['created_at']),
         updatedAt: DateTime.parse(json['updated_at']),
       );

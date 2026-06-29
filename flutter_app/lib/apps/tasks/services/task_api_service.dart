@@ -68,6 +68,7 @@ class TaskApiService {
     int? parentTaskId,
     bool isRecurring = false,
     String? recurrenceRule,
+    bool? inheritSubtaskDuration,
     List<int> tagIds = const [],
   }) async {
     final r = await http.post(
@@ -82,6 +83,8 @@ class TaskApiService {
         if (parentTaskId != null) 'parent_task_id': parentTaskId,
         'is_recurring': isRecurring,
         if (recurrenceRule != null) 'recurrence_rule': recurrenceRule,
+        if (inheritSubtaskDuration != null)
+          'inherit_subtask_duration': inheritSubtaskDuration,
         'tag_ids': tagIds,
       }),
     );
@@ -139,6 +142,7 @@ class TaskApiService {
     int? parentTaskId,
     bool? isRecurring,
     String? recurrenceRule,
+    bool? inheritSubtaskDuration,
     List<int>? tagIds,
   }) async {
     final body = <String, dynamic>{};
@@ -149,6 +153,9 @@ class TaskApiService {
     if (parentTaskId != null) body['parent_task_id'] = parentTaskId;
     if (isRecurring != null) body['is_recurring'] = isRecurring;
     if (recurrenceRule != null) body['recurrence_rule'] = recurrenceRule;
+    if (inheritSubtaskDuration != null) {
+      body['inherit_subtask_duration'] = inheritSubtaskDuration;
+    }
     if (tagIds != null) body['tag_ids'] = tagIds;
 
     final r = await http.put(
@@ -163,6 +170,20 @@ class TaskApiService {
   static Future<void> deleteTask(int id) async {
     final r = await http.delete(Uri.parse('$_baseUrl/tasks/$id'), headers: await _headers());
     if (r.statusCode != 200) throw _err(r, 'Failed to delete task');
+  }
+
+  /// Persist a manual ordering for [orderedIds] within a project. Each task is
+  /// assigned a sequential sort_order (0, 1, 2, …) in the given order.
+  static Future<void> reorderTasks({
+    required int projectId,
+    required List<int> orderedIds,
+  }) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/tasks/reorder'),
+      headers: await _headers(),
+      body: json.encode({'project_id': projectId, 'ordered_ids': orderedIds}),
+    );
+    if (r.statusCode != 200) throw _err(r, 'Failed to reorder tasks');
   }
 
   /// Delete multiple tasks at once. Returns the count of deleted tasks.

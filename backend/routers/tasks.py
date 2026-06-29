@@ -101,6 +101,52 @@ def _actual_duration_minutes(task: Task) -> Optional[float]:
     )
 
 
+def _tree_actual_minutes(task: Task) -> Optional[float]:
+    """Total actual minutes for this task plus all descendants (recursive).
+
+    Sums the task's own completed work sessions and every subtask's tree total.
+    Returns None only when neither the task nor any descendant has logged time.
+    """
+    total = 0.0
+    has_any = False
+    own = _actual_duration_minutes(task)
+    if own is not None:
+        total += own
+        has_any = True
+    for st in task.subtasks:
+        sub = _tree_actual_minutes(st)
+        if sub is not None:
+            total += sub
+            has_any = True
+    return total if has_any else None
+
+
+def _inherits_duration(task: Task) -> bool:
+    """Whether a parent task derives its duration from its subtasks.
+
+    A task only inherits when it actually has subtasks. The stored flag may be
+    NULL for legacy parents created before this feature; treat NULL as True so
+    roll-up is the default for parents.
+    """
+    if not task.subtasks:
+        return False
+    return task.inherit_subtask_duration is None or bool(task.inherit_subtask_duration)
+
+
+def _effective_duration_minutes(task: Task) -> Optional[int]:
+    """Duration shown for a task: summed from subtasks when inheriting, else own."""
+    if _inherits_duration(task):
+        total = 0
+        has_any = False
+        for st in task.subtasks:
+            sub = _effective_duration_minutes(st)
+            if sub is not None:
+                total += sub
+                has_any = True
+        return total if has_any else None
+    return task.duration_minutes
+
+
 def _active_session(task: Task) -> Optional["WorkSession"]:
     """Return the task's currently-active work session (ended_at is None), if any."""
     return next((s for s in task.work_sessions if s.ended_at is None), None)
@@ -114,7 +160,9 @@ def _serialize_task(task: Task, now: datetime.datetime) -> Dict[str, Any]:
         "title": task.title,
         "description": task.description,
         "due_date": task.due_date.isoformat() if task.due_date else None,
-        "duration_minutes": task.duration_minutes,
+        "duration_minutes": _effective_duration_minutes(task),
+        "own_duration_minutes": task.duration_minutes,
+        "inherit_subtask_duration": _inherits_duration(task),
         "start_by": _start_by(task).isoformat() if _start_by(task) else None,
         "is_completed": task.is_completed,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
@@ -124,12 +172,13 @@ def _serialize_task(task: Task, now: datetime.datetime) -> Dict[str, Any]:
         "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in task.tags],
         "subtasks": [_serialize_task(st, now) for st in task.subtasks],
         "urgency_score": _tree_urgency(task, now),
-        "actual_duration_minutes": _actual_duration_minutes(task),
+        "actual_duration_minutes": _tree_actual_minutes(task),
         "active_session_started_at": (
             _utc_iso(_active_session(task).started_at)
             if _active_session(task) else None
         ),
         "parent_task_id": task.parent_task_id,
+        "sort_order": task.sort_order,
         "created_at": task.created_at.isoformat(),
         "updated_at": task.updated_at.isoformat() if task.updated_at else task.created_at.isoformat(),
     }
@@ -354,6 +403,8 @@ class TaskCreate(BaseModel):
     parent_task_id: Optional[int] = None
     is_recurring: bool = False
     recurrence_rule: Optional[str] = None
+    inherit_subtask_duration: Optional[bool] = None
+    sort_order: Optional[float] = None
     tag_ids: List[int] = []
 
 
@@ -365,6 +416,8 @@ class TaskUpdate(BaseModel):
     parent_task_id: Optional[int] = None
     is_recurring: Optional[bool] = None
     recurrence_rule: Optional[str] = None
+    inherit_subtask_duration: Optional[bool] = None
+    sort_order: Optional[float] = None
     tag_ids: Optional[List[int]] = None
 
 
@@ -1044,6 +1097,43 @@ class BatchCompleteBody(BaseModel):
     note: Optional[str] = None
 
 
+class ReorderBody(BaseModel):
+    project_id: int
+    ordered_ids: List[int]
+
+
+@tasks_router.post("/reorder")
+async def reorder_tasks(
+    body: ReorderBody,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Persist a manual ordering for a set of tasks.
+
+    ``ordered_ids`` is the desired order; each listed task receives a sequential
+    ``sort_order`` (0, 1, 2, …) so that a "Manual" sort renders them in this
+    order. Only tasks in the given project are touched; unknown ids are ignored.
+    """
+    _assert_can_write(body.project_id, user_id, session)
+    if not body.ordered_ids:
+        return {"updated": 0}
+    tasks = {
+        t.id: t
+        for t in session.query(Task).filter(
+            Task.id.in_(body.ordered_ids),
+            Task.project_id == body.project_id,
+        ).all()
+    }
+    updated = 0
+    for position, tid in enumerate(body.ordered_ids):
+        t = tasks.get(tid)
+        if t is not None:
+            t.sort_order = float(position)
+            updated += 1
+    session.commit()
+    return {"updated": updated}
+
+
 @tasks_router.post("/batch-delete")
 async def batch_delete_tasks(
     body: BatchDeleteBody,
@@ -1218,6 +1308,8 @@ async def create_task(
         parent_task_id=body.parent_task_id,
         is_recurring=body.is_recurring,
         recurrence_rule=body.recurrence_rule,
+        inherit_subtask_duration=body.inherit_subtask_duration,
+        sort_order=body.sort_order,
     )
     if body.tag_ids:
         tags = session.query(Tag).filter(Tag.id.in_(body.tag_ids), Tag.user_id == user_id).all()
@@ -1255,6 +1347,10 @@ async def update_task(
         task.is_recurring = body.is_recurring
     if body.recurrence_rule is not None:
         task.recurrence_rule = body.recurrence_rule
+    if body.inherit_subtask_duration is not None:
+        task.inherit_subtask_duration = body.inherit_subtask_duration
+    if body.sort_order is not None:
+        task.sort_order = body.sort_order
     if body.tag_ids is not None:
         tags = session.query(Tag).filter(Tag.id.in_(body.tag_ids), Tag.user_id == user_id).all()
         task.tags = tags
@@ -1391,6 +1487,27 @@ def _mark_task_done(
     else:
         task.is_completed = True
         task.completed_at = completion_time
+        _autocomplete_parent(task, user_id, session, now)
+
+
+def _autocomplete_parent(
+    task: Task,
+    user_id: int,
+    session: Session,
+    now: datetime.datetime,
+):
+    """Auto-complete a parent task once all of its subtasks are complete.
+
+    Walks up one level: if the just-completed task's parent is non-recurring,
+    not already complete, and every one of its subtasks is complete, the parent
+    is closed via ``_mark_task_done`` (which records history and stops any active
+    session). That call recurses, so completion bubbles up the whole chain.
+    """
+    parent = task.parent_task
+    if parent is None or parent.is_completed or parent.is_recurring:
+        return
+    if parent.subtasks and all(st.is_completed for st in parent.subtasks):
+        _mark_task_done(parent, user_id, session, now, status="completed")
 
 
 class CompleteBody(BaseModel):
@@ -1714,8 +1831,10 @@ async def get_plan(
         raise HTTPException(status_code=404, detail="Plan not found")
     _assert_project_member(plan.project_id, user_id, session)
 
-    # Expand {{task:ID}} tokens → include task objects keyed by ID
-    token_ids = [int(m.group(1)) for m in re.finditer(r"\{\{task:(\d+)\}\}", plan.content)]
+    # Expand task tokens → include task objects keyed by ID. Matches both the
+    # standalone `{{task:ID}}` token and `task:ID` member lines inside a
+    # `{{tasklist ...}}` block, so embedded task-lists resolve their members.
+    token_ids = [int(m.group(1)) for m in re.finditer(r"task:(\d+)", plan.content)]
     now = datetime.datetime.utcnow()
     task_map: Dict[str, Any] = {}
     for tid in set(token_ids):

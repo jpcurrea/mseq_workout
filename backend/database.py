@@ -214,6 +214,13 @@ class Task(Base):
     completed_at = Column(DateTime, nullable=True)
     is_recurring = Column(Boolean, nullable=False, default=False)
     recurrence_rule = Column(String, nullable=True)  # "DAILY" | "WEEKLY" | "MONTHLY"
+    # When True (or NULL for legacy parents with subtasks), a parent task's
+    # effective duration is the sum of its subtasks' durations; when False the
+    # parent uses its own manually-set duration_minutes.
+    inherit_subtask_duration = Column(Boolean, nullable=True)
+    # Manual ordering position within a list. Seeded from a parameter sort and
+    # then adjusted by drag-and-drop. NULL means "no manual position set".
+    sort_order = Column(Float, nullable=True)
     # How a recurring task advances on completion: "now" (next iteration after
     # the current moment, skipping missed ones) or "stop" (next iteration after
     # the selected stop time).
@@ -471,6 +478,8 @@ def init_db():
         "ALTER TABLE task_completions ADD COLUMN work_sessions_json TEXT",
         "ALTER TABLE task_completions ADD COLUMN note TEXT",
         "ALTER TABLE tasks ADD COLUMN recurrence_advance_mode TEXT",
+        "ALTER TABLE tasks ADD COLUMN inherit_subtask_duration BOOLEAN",
+        "ALTER TABLE tasks ADD COLUMN sort_order REAL",
     ]
     with engine.connect() as conn:
         for stmt in _migrations:

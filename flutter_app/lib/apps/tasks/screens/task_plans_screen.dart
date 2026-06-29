@@ -11,6 +11,7 @@ import '../services/task_api_service.dart';
 import '../services/project_api_service.dart';
 import '../services/agent_api_service.dart';
 import '../widgets/task_card.dart';
+import '../widgets/task_list_view.dart';
 import '../widgets/ai_settings_dialog.dart';
 import 'task_form_screen.dart';
 
@@ -498,39 +499,125 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')} $timeStr';
   }
 
-  Future<void> _insertTaskWidget() async {
+  /// Entry point for the toolbar "+" button. If the caret sits inside an
+  /// existing `{{tasklist ...}}` block, a chosen task is appended to that block.
+  /// Otherwise the user picks whether to insert a single task or a task-list.
+  Future<void> _onInsertPressed() async {
+    if (_plan == null) return;
+    final blockRange = _enclosingTaskListRange(_contentCtrl.selection.baseOffset);
+    if (blockRange != null) {
+      final task = await _pickOrCreateTask();
+      if (task != null) _addTaskToList(blockRange, task);
+      return;
+    }
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.check_box_outlined),
+              title: const Text('Insert task'),
+              subtitle: const Text('Embed a single interactive task card'),
+              onTap: () => Navigator.pop(context, 'task'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.format_list_bulleted),
+              title: const Text('Insert task-list'),
+              subtitle: const Text('A sortable, draggable list of tasks'),
+              onTap: () => Navigator.pop(context, 'tasklist'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == 'task') {
+      final task = await _pickOrCreateTask();
+      if (task != null) _insertTaskToken(task);
+    } else if (choice == 'tasklist') {
+      _insertTaskListBlock();
+    }
+  }
+
+  /// Shows the task picker (existing tasks + "create new") and returns the
+  /// chosen or newly created [Task], or null if cancelled.
+  Future<Task?> _pickOrCreateTask() async {
     List<Task> tasks = [];
     try {
       if (_plan != null) {
         tasks = await TaskApiService.getTasks(projectId: _plan!.projectId);
       }
     } catch (_) {}
-    if (!mounted) return;
+    if (!mounted) return null;
 
     final result = await showDialog<Object>(
       context: context,
       builder: (_) => _TaskPickerDialog(tasks: tasks),
     );
     if (result == _kCreateNewTaskSentinel) {
-      await _createAndInsertTask();
-      return;
+      if (_plan == null || !mounted) return null;
+      final created = await Navigator.of(context).push<Object>(
+        MaterialPageRoute(
+          builder: (_) => TaskFormScreen(
+            projectId: _plan!.projectId,
+            returnCreatedTask: true,
+          ),
+        ),
+      );
+      return created is Task ? created : null;
     }
-    if (result is Task) _insertTaskToken(result);
+    return result is Task ? result : null;
   }
 
-  /// Opens the task form to create a brand-new task, then inserts its widget
-  /// token into the plan at the cursor.
-  Future<void> _createAndInsertTask() async {
-    if (_plan == null) return;
-    final created = await Navigator.of(context).push<Object>(
-      MaterialPageRoute(
-        builder: (_) => TaskFormScreen(
-          projectId: _plan!.projectId,
-          returnCreatedTask: true,
-        ),
-      ),
-    );
-    if (created is Task) _insertTaskToken(created);
+  /// Returns the [start, end) character range of the `{{tasklist ...}}` block
+  /// enclosing [offset], or null if the caret is not inside one.
+  ({int start, int end})? _enclosingTaskListRange(int offset) {
+    if (offset < 0) return null;
+    final re = RegExp(r'\{\{tasklist[\s\S]*?\}\}');
+    for (final m in re.allMatches(_contentCtrl.text)) {
+      if (offset >= m.start && offset <= m.end) {
+        return (start: m.start, end: m.end);
+      }
+    }
+    return null;
+  }
+
+  /// Inserts an empty task-list block at the cursor and positions the caret
+  /// inside it so subsequent inserts append to this block.
+  void _insertTaskListBlock() {
+    const header = '{{tasklist sort=manual\n';
+    const footer = '}}';
+    final block = '$header$footer';
+    final pos = _contentCtrl.selection.baseOffset;
+    final text = _contentCtrl.text;
+    final at = pos >= 0 ? pos : text.length;
+    final newText = '${text.substring(0, at)}$block${text.substring(at)}';
+    _contentCtrl.text = newText;
+    // Place caret just after the header newline (inside the block).
+    final caret = at + header.length;
+    _contentCtrl.selection = TextSelection.collapsed(offset: caret);
+    setState(() => _hasChanges = true);
+  }
+
+  /// Appends a `- task:ID  Title` line just before the closing `}}` of the
+  /// task-list block at [range], and registers the task for live preview.
+  void _addTaskToList(({int start, int end}) range, Task task) {
+    final text = _contentCtrl.text;
+    final block = text.substring(range.start, range.end);
+    final closeRel = block.lastIndexOf('}}');
+    if (closeRel < 0) return;
+    final closeAbs = range.start + closeRel;
+    // Ensure the inserted line starts on its own line.
+    final before = text.substring(0, closeAbs);
+    final needsNewline = before.isNotEmpty && !before.endsWith('\n');
+    final line = '${needsNewline ? '\n' : ''}- task:${task.id}  ${task.title}\n';
+    final newText = '$before$line${text.substring(closeAbs)}';
+    _contentCtrl.text = newText;
+    setState(() {
+      _plan?.tasks[task.id.toString()] = task;
+      _hasChanges = true;
+    });
   }
 
   /// Inserts a `{{task:ID}}` widget token for [task] at the cursor and makes it
@@ -549,6 +636,36 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       _plan?.tasks[task.id.toString()] = task;
       _hasChanges = true;
     });
+  }
+
+  /// Persists a new manual order for tasks reordered inside an embedded
+  /// task-list, then refreshes the plan's task map to reflect new sort values.
+  Future<void> _reorderPlanTasks(List<int> orderedIds) async {
+    if (_plan == null) return;
+    try {
+      await TaskApiService.reorderTasks(
+        projectId: _plan!.projectId,
+        orderedIds: orderedIds,
+      );
+      await _refreshPlanTasks();
+    } catch (e) {
+      if (mounted) _showError(context, e.toString());
+    }
+  }
+
+  /// Re-fetches the plan to refresh its embedded task map (e.g. after a
+  /// reorder) without disturbing the editor text.
+  Future<void> _refreshPlanTasks() async {
+    if (_plan == null) return;
+    try {
+      final fresh = await TaskApiService.getPlan(_plan!.id);
+      if (!mounted) return;
+      setState(() {
+        _plan!.tasks
+          ..clear()
+          ..addAll(fresh.tasks);
+      });
+    } catch (_) {}
   }
 
   IconData _previewModeIcon() {
@@ -1026,8 +1143,8 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
           if (_isEditMode && _plan != null)
             IconButton(
               icon: const Icon(Icons.add_box_outlined),
-              tooltip: 'Insert task widget',
-              onPressed: _insertTaskWidget,
+              tooltip: 'Insert task or task-list',
+              onPressed: _onInsertPressed,
             ),
           if (_isEditMode && _hasChanges)
             _isSaving
@@ -1276,7 +1393,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
               forceStrutHeight: true,
             ),
             decoration: const InputDecoration(
-              hintText: 'Write your plan here...\n\nUse the ⊞ button to embed task widgets as {{task:ID}}.',
+              hintText: 'Write your plan here...\n\nUse the ⊞ button to embed a task ({{task:ID}}) or a sortable task-list ({{tasklist ...}}).',
               border: OutlineInputBorder(),
             ),
             onChanged: (_) => setState(() => _hasChanges = true),
@@ -1298,6 +1415,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
       onStartSession: _startSession,
       onStopSession: _stopSession,
       onEdit: _openTaskEditor,
+      onReorderTasks: _reorderPlanTasks,
     );
   }
 }
@@ -1316,6 +1434,7 @@ class _PlanPreviewView extends StatelessWidget {
   final Future<void> Function(Task) onStartSession;
   final Future<void> Function(Task) onStopSession;
   final Future<void> Function(Task) onEdit;
+  final Future<void> Function(List<int> orderedIds) onReorderTasks;
 
   const _PlanPreviewView({
     required this.content,
@@ -1327,6 +1446,7 @@ class _PlanPreviewView extends StatelessWidget {
     required this.onStartSession,
     required this.onStopSession,
     required this.onEdit,
+    required this.onReorderTasks,
   });
 
   @override
@@ -1341,52 +1461,37 @@ class _PlanPreviewView extends StatelessWidget {
 
   List<Widget> _parse(BuildContext context) {
     final result = <Widget>[];
-    final tokenRegex = RegExp(r'\{\{task:(\d+)\}\}');
+    // Matches either a {{tasklist ...}} block (greedy until its closing }})
+    // or a standalone {{task:ID}} token. Block is tried first via alternation.
+    final tokenRegex = RegExp(r'\{\{tasklist[\s\S]*?\}\}|\{\{task:(\d+)\}\}');
     int lastEnd = 0;
+
+    void addMarkdown(String text) {
+      if (text.trim().isEmpty) return;
+      result.add(Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: MarkdownBody(
+          data: text,
+          styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
+        ),
+      ));
+    }
 
     for (final match in tokenRegex.allMatches(content)) {
       if (match.start > lastEnd) {
-        final text = content.substring(lastEnd, match.start);
-        if (text.trim().isNotEmpty) {
-          result.add(Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: MarkdownBody(
-              data: text,
-              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
-            ),
-          ));
-        }
+        addMarkdown(content.substring(lastEnd, match.start));
       }
 
-      final taskId = match.group(1)!;
-      final task = tasks[taskId];
-      if (task != null) {
+      final raw = match.group(0)!;
+      if (raw.startsWith('{{tasklist')) {
         result.add(Padding(
           padding: const EdgeInsets.only(bottom: 8),
-          child: TaskCardTree(
-            task: task,
-            activeSessions: {for (final id in activeSessions) id: true},
-            viewMode: viewMode,
-            timeUnit: timeUnit,
-            onComplete: (t) { onComplete(t); },
-            onStartSession: (t) { onStartSession(t); },
-            onStopSession: (t) { onStopSession(t); },
-            onEdit: (t) { onEdit(t); },
-          ),
+          child: _buildTaskList(context, raw),
         ));
       } else {
         result.add(Padding(
           padding: const EdgeInsets.only(bottom: 8),
-          child: Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: Colors.grey[100],
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.grey[300]!),
-            ),
-            child: Text('Task #$taskId not found',
-                style: TextStyle(color: Colors.grey[500], fontSize: 12)),
-          ),
+          child: _buildTaskCard(context, match.group(1)!),
         ));
       }
 
@@ -1394,13 +1499,7 @@ class _PlanPreviewView extends StatelessWidget {
     }
 
     if (lastEnd < content.length) {
-      final text = content.substring(lastEnd);
-      if (text.trim().isNotEmpty) {
-        result.add(MarkdownBody(
-          data: text,
-          styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
-        ));
-      }
+      addMarkdown(content.substring(lastEnd));
     }
 
     if (result.isEmpty) {
@@ -1415,6 +1514,113 @@ class _PlanPreviewView extends StatelessWidget {
     }
 
     return result;
+  }
+
+  /// Renders a single `{{task:ID}}` token as an interactive card.
+  Widget _buildTaskCard(BuildContext context, String taskId) {
+    final task = tasks[taskId];
+    if (task == null) return _notFound(taskId);
+    return TaskCardTree(
+      task: task,
+      activeSessions: {for (final id in activeSessions) id: true},
+      viewMode: viewMode,
+      timeUnit: timeUnit,
+      onComplete: (t) { onComplete(t); },
+      onStartSession: (t) { onStartSession(t); },
+      onStopSession: (t) { onStopSession(t); },
+      onEdit: (t) { onEdit(t); },
+    );
+  }
+
+  /// Renders a `{{tasklist ...}}` block as an embedded, sortable task-list.
+  Widget _buildTaskList(BuildContext context, String raw) {
+    // Member task IDs, in document order.
+    final ids = RegExp(r'task:(\d+)')
+        .allMatches(raw)
+        .map((m) => m.group(1)!)
+        .toList();
+    final members = <Task>[];
+    final seen = <String>{};
+    for (final id in ids) {
+      if (!seen.add(id)) continue;
+      final t = tasks[id];
+      if (t != null) members.add(t);
+    }
+
+    // Honor an optional `sort=` directive on first render.
+    final sortMatch = RegExp(r'sort=(\w+)').firstMatch(raw);
+    final initialSort = _sortModeFromName(sortMatch?.group(1));
+
+    // Unique tags drawn from the member tasks (and their subtasks).
+    final tags = _collectTags(members);
+
+    // Stable per-block preferences key from the first member id.
+    final keySuffix = ids.isNotEmpty ? ids.first : 'empty';
+
+    if (members.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.grey[100],
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.grey[300]!),
+        ),
+        child: Text('Empty task-list',
+            style: TextStyle(color: Colors.grey[500], fontSize: 12)),
+      );
+    }
+
+    return TaskListView(
+      tasks: members,
+      tags: tags,
+      activeSessions: activeSessions,
+      timeUnit: timeUnit,
+      embedded: true,
+      prefsKeyPrefix: 'plan_tasklist_$keySuffix',
+      initialSortMode: initialSort,
+      onComplete: (t) { onComplete(t); },
+      onStartSession: (t) { onStartSession(t); },
+      onStopSession: (t) { onStopSession(t); },
+      onEdit: (t) { onEdit(t); },
+      onReorder: (orderedIds) => onReorderTasks(orderedIds),
+    );
+  }
+
+  TaskSortMode? _sortModeFromName(String? name) {
+    if (name == null) return null;
+    for (final m in TaskSortMode.values) {
+      if (m.name == name) return m;
+    }
+    return null;
+  }
+
+  List<Tag> _collectTags(List<Task> tasks) {
+    final byId = <int, Tag>{};
+    void visit(Task t) {
+      for (final tag in t.tags) {
+        byId[tag.id] = tag;
+      }
+      for (final sub in t.subtasks) {
+        visit(sub);
+      }
+    }
+    for (final t in tasks) {
+      visit(t);
+    }
+    return byId.values.toList();
+  }
+
+  Widget _notFound(String taskId) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.grey[100],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[300]!),
+      ),
+      child: Text('Task #$taskId not found',
+          style: TextStyle(color: Colors.grey[500], fontSize: 12)),
+    );
   }
 }
 
