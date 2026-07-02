@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class AgentChatEntry {
   final String role; // 'user' | 'assistant' | 'error'
@@ -66,6 +67,13 @@ class _AgentChatPanelState extends State<AgentChatPanel> {
   late final TextEditingController _ctrl;
   bool _ownCtrl = false;
 
+  // ── Resizable body height ────────────────────────────────────────────────────
+  static const double _minBodyHeight = 160;
+  static const double _defaultBodyHeight = 320;
+  double _bodyHeight = _defaultBodyHeight;
+
+  String get _heightPrefsKey => 'agent_panel_height_${widget.title}';
+
   // ── TTS ─────────────────────────────────────────────────────────────────────
   final FlutterTts _tts = FlutterTts();
   bool _ttsEnabled = true;
@@ -81,7 +89,29 @@ class _AgentChatPanelState extends State<AgentChatPanel> {
     super.initState();
     _ctrl = widget.textController ?? TextEditingController();
     _ownCtrl = widget.textController == null;
+    _loadBodyHeight();
     _initVoice();
+  }
+
+  Future<void> _loadBodyHeight() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getDouble(_heightPrefsKey);
+      if (saved != null && mounted) {
+        setState(() => _bodyHeight = saved);
+      }
+    } catch (_) {
+      // Ignore persistence errors; fall back to the default height.
+    }
+  }
+
+  Future<void> _saveBodyHeight() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble(_heightPrefsKey, _bodyHeight);
+    } catch (_) {
+      // Non-fatal.
+    }
   }
 
   Future<void> _initVoice() async {
@@ -255,17 +285,55 @@ class _AgentChatPanelState extends State<AgentChatPanel> {
   }
 
   Widget _buildBody(ThemeData theme) {
+    // Cap the panel so it can't grow past most of the screen (leaving room for
+    // the header, app bar and keyboard).
+    final maxBodyHeight = (MediaQuery.of(context).size.height * 0.75)
+        .clamp(_minBodyHeight, double.infinity);
+    if (_bodyHeight > maxBodyHeight) _bodyHeight = maxBodyHeight.toDouble();
     return Container(
-      height: 320,
+      height: _bodyHeight,
       decoration: BoxDecoration(
         color: theme.colorScheme.surface,
         border: Border(top: BorderSide(color: theme.colorScheme.outlineVariant)),
       ),
       child: Column(
         children: [
+          _buildResizeHandle(theme, maxBodyHeight.toDouble()),
           Expanded(child: _buildMessageList(theme)),
           _buildInputRow(theme),
         ],
+      ),
+    );
+  }
+
+  /// A draggable grip along the top edge that stretches the panel up/down.
+  Widget _buildResizeHandle(ThemeData theme, double maxBodyHeight) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeUpDown,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onVerticalDragUpdate: (details) {
+          // Dragging up (negative dy) makes the panel taller.
+          setState(() {
+            _bodyHeight = (_bodyHeight - details.delta.dy)
+                .clamp(_minBodyHeight, maxBodyHeight)
+                .toDouble();
+          });
+        },
+        onVerticalDragEnd: (_) => _saveBodyHeight(),
+        child: Container(
+          width: double.infinity,
+          height: 18,
+          alignment: Alignment.center,
+          child: Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.outline,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+        ),
       ),
     );
   }

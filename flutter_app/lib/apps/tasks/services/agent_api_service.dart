@@ -200,4 +200,122 @@ class AgentApiService {
       throw _err(r, 'Failed to clear AI settings');
     }
   }
+
+  // ── Agent routines ─────────────────────────────────────────────────────────
+
+  /// List the user's routines. If [projectId] is given, project-scoped
+  /// routines for that project are included alongside global ones.
+  static Future<List<AgentRoutine>> listRoutines({int? projectId}) async {
+    final uri = Uri.parse('$_baseUrl/agent/routines').replace(
+      queryParameters: {if (projectId != null) 'project_id': '$projectId'},
+    );
+    final r = await http.get(uri, headers: await _headers());
+    if (r.statusCode == 200) {
+      final raw = (json.decode(r.body) as List?) ?? const [];
+      return raw
+          .map((e) => AgentRoutine.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList();
+    }
+    throw _err(r, 'Failed to load routines');
+  }
+
+  static Future<AgentRoutine> createRoutine({
+    required String name,
+    required String steps,
+    String? description,
+    String? whenToUse,
+    int? projectId,
+  }) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/agent/routines'),
+      headers: await _headers(),
+      body: json.encode({
+        'name': name,
+        'steps': steps,
+        if (description != null) 'description': description,
+        if (whenToUse != null) 'when_to_use': whenToUse,
+        if (projectId != null) 'project_id': projectId,
+      }),
+    );
+    if (r.statusCode == 200) {
+      return AgentRoutine.fromJson(json.decode(r.body) as Map<String, dynamic>);
+    }
+    throw _err(r, 'Failed to create routine');
+  }
+
+  static Future<AgentRoutine> updateRoutine(
+    int routineId, {
+    String? name,
+    String? steps,
+    String? description,
+    String? whenToUse,
+    String? scope,
+    int? projectId,
+  }) async {
+    final r = await http.put(
+      Uri.parse('$_baseUrl/agent/routines/$routineId'),
+      headers: await _headers(),
+      body: json.encode({
+        if (name != null) 'name': name,
+        if (steps != null) 'steps': steps,
+        if (description != null) 'description': description,
+        if (whenToUse != null) 'when_to_use': whenToUse,
+        if (scope != null) 'scope': scope,
+        if (projectId != null) 'project_id': projectId,
+      }),
+    );
+    if (r.statusCode == 200) {
+      return AgentRoutine.fromJson(json.decode(r.body) as Map<String, dynamic>);
+    }
+    throw _err(r, 'Failed to update routine');
+  }
+
+  static Future<void> deleteRoutine(int routineId) async {
+    final r = await http.delete(
+      Uri.parse('$_baseUrl/agent/routines/$routineId'),
+      headers: await _headers(),
+    );
+    if (r.statusCode != 200) {
+      throw _err(r, 'Failed to delete routine');
+    }
+  }
+}
+
+/// A saved agent routine: a reusable, named set of steps the agent can follow.
+class AgentRoutine {
+  final int id;
+  final String name;
+  final String? description;
+  final String? whenToUse;
+  final String scope; // "global" | "project"
+  final int? projectId;
+  final bool isSystem;
+  final String createdBy; // "user" | "agent" | "system"
+  final String steps;
+
+  const AgentRoutine({
+    required this.id,
+    required this.name,
+    this.description,
+    this.whenToUse,
+    required this.scope,
+    this.projectId,
+    required this.isSystem,
+    required this.createdBy,
+    this.steps = '',
+  });
+
+  factory AgentRoutine.fromJson(Map<String, dynamic> json) {
+    return AgentRoutine(
+      id: json['id'] as int,
+      name: (json['name'] ?? '').toString(),
+      description: json['description'] as String?,
+      whenToUse: json['when_to_use'] as String?,
+      scope: (json['scope'] ?? 'global').toString(),
+      projectId: json['project_id'] as int?,
+      isSystem: json['is_system'] == true,
+      createdBy: (json['created_by'] ?? 'user').toString(),
+      steps: (json['steps'] ?? '').toString(),
+    );
+  }
 }

@@ -417,6 +417,29 @@ class TaskApiService {
     throw _err(r, 'Failed to load plan history');
   }
 
+  /// Preview the content a revert to [revisionId] would produce, without
+  /// changing the plan.
+  static Future<String> getPlanRevisionPreview(int planId, int revisionId) async {
+    final r = await http.get(
+      Uri.parse('$_baseUrl/plans/$planId/revisions/$revisionId/preview'),
+      headers: await _headers(),
+    );
+    if (r.statusCode == 200) return (json.decode(r.body)['content'] as String?) ?? '';
+    throw _err(r, 'Failed to preview revision');
+  }
+
+  /// Revert a plan to an earlier stage. The revert is saved as a new revision
+  /// so it can itself be reverted. Returns the reverted plan content.
+  static Future<String> revertPlan(int planId, {required int revisionId}) async {
+    final r = await http.post(
+      Uri.parse('$_baseUrl/plans/$planId/revert'),
+      headers: await _headers(),
+      body: json.encode({'revision_id': revisionId}),
+    );
+    if (r.statusCode == 200) return (json.decode(r.body)['content'] as String?) ?? '';
+    throw _err(r, 'Failed to revert plan');
+  }
+
   // ── Calendar / Gantt ───────────────────────────────────────────────────────
 
   static Future<List<Map<String, dynamic>>> getCalendarTasks({required int projectId}) async {

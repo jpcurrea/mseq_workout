@@ -2,7 +2,7 @@
 Tests for the todo-mode agent: tools schema, context builder, HTTP endpoint.
 
 Coverage:
-  - _todo_tools_schema returns exactly the 4 expected tools with no plan tools
+  - _todo_tools_schema returns the task/datetime tools plus shared routine/help tools
   - _build_project_context(mode='todo') returns the right shape
   - _build_system_prompt(mode='todo') produces todo-flavoured content
   - GET /agent/conversation accepts mode=todo
@@ -44,9 +44,10 @@ def _call(name, args, *, db, user, project, dry_run=False):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestTodoToolsSchema:
-    def test_returns_five_tools(self):
+    def test_returns_expected_tool_count(self):
         tools = _todo_tools_schema()
-        assert len(tools) == 5
+        # 5 task/datetime tools + 4 shared routine/help tools.
+        assert len(tools) == 9
 
     def test_tool_names(self):
         names = {t["function"]["name"] for t in _todo_tools_schema()}
@@ -56,6 +57,10 @@ class TestTodoToolsSchema:
             "update_task",
             "delete_task",
             "get_current_datetime",
+            "get_help",
+            "list_routines",
+            "get_routine",
+            "save_routine",
         }
 
     def test_no_plan_tools(self):

@@ -1785,6 +1785,84 @@ class PlanUpdate(BaseModel):
     content: Optional[str] = None
 
 
+class PlanRevertRequest(BaseModel):
+    # Restore the plan to its state as of this revision (the "reversal point").
+    revision_id: int
+
+
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _reverse_apply_unified_diff(current_content: str, diff_text: str) -> str:
+    """Reconstruct the "before" content from the "after" content plus the
+    unified diff that produced it (old -> new). Equivalent to ``patch -R``.
+
+    Diffs are produced by ``difflib.unified_diff(old.splitlines(),
+    new.splitlines(), lineterm="")`` joined with "\\n", so we split on "\\n"
+    and compare against ``current_content.splitlines()``. Returns the
+    reconstructed content joined with "\\n".
+    """
+    current_lines = (current_content or "").splitlines()
+    diff_lines = (diff_text or "").split("\n")
+    result: List[str] = []
+    idx = 0  # 0-based pointer into current_lines (the NEW side of the diff)
+    i = 0
+    n = len(diff_lines)
+    while i < n:
+        header = _HUNK_HEADER_RE.match(diff_lines[i])
+        if not header:
+            i += 1
+            continue
+        new_start = int(header.group(2)) - 1  # 0-based start on the NEW side
+        # Copy unchanged lines that precede this hunk.
+        while idx < new_start and idx < len(current_lines):
+            result.append(current_lines[idx])
+            idx += 1
+        i += 1
+        # Walk the hunk body until the next hunk header or EOF.
+        while i < n and not _HUNK_HEADER_RE.match(diff_lines[i]):
+            hl = diff_lines[i]
+            if hl.startswith("--- ") or hl.startswith("+++ "):
+                i += 1
+                continue
+            tag = hl[:1]
+            text = hl[1:]
+            if tag == " ":
+                # Context line: present in both sides. Keep and advance.
+                result.append(text)
+                idx += 1
+            elif tag == "+":
+                # Added in NEW only: to reverse, drop it (advance the pointer).
+                idx += 1
+            elif tag == "-":
+                # Removed in NEW (present in OLD): to reverse, re-add it.
+                result.append(text)
+            # "\ No newline at end of file" and blank marker lines are ignored.
+            i += 1
+    # Copy any trailing lines after the last hunk.
+    while idx < len(current_lines):
+        result.append(current_lines[idx])
+        idx += 1
+    return "\n".join(result)
+
+
+def _reconstruct_plan_content_at_revision(
+    plan: Plan,
+    revisions_chrono: List[PlanRevision],
+    target_revision_id: int,
+) -> str:
+    """Return the plan content as it was immediately after ``target_revision_id``
+    was saved, by reverse-applying every revision newer than it to the current
+    content (implementing the opposite of all changes since the reversal point).
+    """
+    content = plan.content or ""
+    for rev in reversed(revisions_chrono):  # newest first
+        if rev.id == target_revision_id:
+            break
+        content = _reverse_apply_unified_diff(content, rev.diff)
+    return content
+
+
 @plans_router.get("")
 async def list_plans(
     project_id: int,
@@ -1922,6 +2000,106 @@ async def get_plan_history(
         }
         for r in revisions
     ]
+
+
+@plans_router.get("/{plan_id}/revisions/{revision_id}/preview")
+async def preview_plan_revision(
+    plan_id: int,
+    revision_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Preview the plan content as it was at a given revision without changing
+    anything. Lets the UI show what a revert would produce before committing."""
+    plan = session.query(Plan).filter(Plan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    _assert_project_member(plan.project_id, user_id, session)
+    revisions = (
+        session.query(PlanRevision)
+        .filter(PlanRevision.plan_id == plan_id)
+        .order_by(PlanRevision.saved_at.asc(), PlanRevision.id.asc())
+        .all()
+    )
+    if not any(r.id == revision_id for r in revisions):
+        raise HTTPException(status_code=404, detail="Revision not found for this plan")
+    content = _reconstruct_plan_content_at_revision(plan, revisions, revision_id)
+    return {
+        "plan_id": plan.id,
+        "revision_id": revision_id,
+        "content": content,
+        "is_current": content == (plan.content or ""),
+    }
+
+
+@plans_router.post("/{plan_id}/revert")
+async def revert_plan(
+    plan_id: int,
+    body: PlanRevertRequest,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """Revert a plan to an earlier stage.
+
+    Rather than discarding history, this reconstructs the content as of the
+    chosen revision (by reverse-applying every later change) and saves it as a
+    NEW revision. That means the revert is itself recorded in history and can be
+    reverted in turn.
+    """
+    plan = session.query(Plan).filter(Plan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    _assert_can_write(plan.project_id, user_id, session)
+
+    revisions = (
+        session.query(PlanRevision)
+        .filter(PlanRevision.plan_id == plan_id)
+        .order_by(PlanRevision.saved_at.asc(), PlanRevision.id.asc())
+        .all()
+    )
+    if not any(r.id == body.revision_id for r in revisions):
+        raise HTTPException(status_code=404, detail="Revision not found for this plan")
+
+    reconstructed = _reconstruct_plan_content_at_revision(plan, revisions, body.revision_id)
+    if reconstructed == (plan.content or ""):
+        return {
+            "id": plan.id,
+            "project_id": plan.project_id,
+            "title": plan.title,
+            "content": plan.content,
+            "reverted": False,
+            "message": "Plan already matches that revision — nothing to change.",
+            "updated_at": plan.updated_at.isoformat() if plan.updated_at else plan.created_at.isoformat(),
+        }
+
+    # Record the revert as a new revision (current -> reverted) so it is itself
+    # reversible.
+    old_lines = (plan.content or "").splitlines()
+    new_lines = reconstructed.splitlines()
+    diff_lines = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile="before", tofile="after",
+        lineterm="",
+    ))
+    if diff_lines:
+        session.add(PlanRevision(
+            plan_id=plan.id,
+            saved_by=user_id,
+            saved_at=datetime.datetime.utcnow(),
+            diff="\n".join(diff_lines),
+        ))
+    plan.content = reconstructed
+    plan.updated_at = datetime.datetime.utcnow()
+    session.commit()
+    return {
+        "id": plan.id,
+        "project_id": plan.project_id,
+        "title": plan.title,
+        "content": plan.content,
+        "reverted": True,
+        "reverted_to_revision_id": body.revision_id,
+        "updated_at": plan.updated_at.isoformat(),
+    }
 
 
 @plans_router.delete("/{plan_id}")

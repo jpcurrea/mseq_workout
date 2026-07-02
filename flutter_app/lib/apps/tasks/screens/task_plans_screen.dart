@@ -14,6 +14,7 @@ import '../widgets/task_card.dart';
 import '../widgets/task_list_view.dart';
 import '../widgets/ai_settings_dialog.dart';
 import 'task_form_screen.dart';
+import 'agent_routines_screen.dart';
 
 /// Shows a persistent error dialog with a Copy button.
 void _showError(BuildContext context, String message) {
@@ -184,6 +185,18 @@ class _TaskPlansScreenState extends State<TaskPlansScreen> {
         ),
         actions: [
           IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+          IconButton(
+            icon: const Icon(Icons.smart_toy_outlined),
+            tooltip: 'Agent routines',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => AgentRoutinesScreen(
+                  projectId: _project?.id,
+                  projectName: _project?.name,
+                ),
+              ),
+            ),
+          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.menu),
             onSelected: (v) {
@@ -451,6 +464,7 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
                     final lines = diff.split('\n');
                     final added = lines.where((l) => l.startsWith('+')).length;
                     final removed = lines.where((l) => l.startsWith('-')).length;
+                    final revId = rev['id'] as int?;
                     return ExpansionTile(
                       leading: const Icon(Icons.save_outlined, size: 20),
                       title: Text(
@@ -478,6 +492,21 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
                             ),
                           ),
                         ),
+                        if (revId != null)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 8, 10, 12),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                OutlinedButton.icon(
+                                  icon: const Icon(Icons.restore, size: 18),
+                                  label: const Text('Restore this version'),
+                                  onPressed: () =>
+                                      _confirmRevert(ctx, revId, savedAt),
+                                ),
+                              ],
+                            ),
+                          ),
                       ],
                     );
                   },
@@ -487,6 +516,50 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _confirmRevert(BuildContext sheetContext, int revisionId, DateTime savedAt) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('Restore this version?'),
+        content: Text(
+          'The plan will be restored to its state from '
+          '${_formatDateTime(savedAt)}.\n\n'
+          'This is saved as a new change, so you can undo it later from history.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dctx).pop(true),
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      final content = await TaskApiService.revertPlan(widget.planId, revisionId: revisionId);
+      if (!mounted) return;
+      // Close the history sheet.
+      if (Navigator.of(sheetContext).canPop()) Navigator.of(sheetContext).pop();
+      setState(() {
+        _contentCtrl.text = content;
+        _hasChanges = false;
+      });
+      // Reload so embedded task widgets refresh.
+      await _load();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Plan restored'), duration: Duration(seconds: 2)),
+        );
+      }
+    } catch (e) {
+      if (mounted) _showError(context, e.toString());
+    }
   }
 
   String _formatDateTime(DateTime dt) {

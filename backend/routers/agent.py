@@ -68,6 +68,7 @@ from database import (
     Tag,
     Task,
     User,
+    AgentRoutine,
 )
 from dependencies import get_current_user_id
 from auth import SECRET_KEY
@@ -389,6 +390,186 @@ def _serialize_task_brief(task: Task) -> Dict[str, Optional[str]]:
     }
 
 
+# ── Routines & help documentation ─────────────────────────────────────────────
+#
+# A "routine" is a saved, reusable playbook the agent can read and execute. Built-in
+# routines are seeded per user (is_system=True) and are read-only to the agent — it
+# may run them but must not edit or delete them. The agent can author its own
+# routines with save_routine.
+
+_ROUTINE_NAME_MAX = 100
+_ROUTINE_TEXT_MAX = 2000     # description / when_to_use
+_ROUTINE_STEPS_MAX = 8000    # the playbook body
+
+_DEFAULT_ROUTINES: List[Dict[str, str]] = [
+    {
+        "name": "Daily triage",
+        "description": "Review today's workload and propose an order to tackle it.",
+        "when_to_use": "When the user starts their day or asks what they should work on / to plan today.",
+        "steps": (
+            "1. Call get_current_datetime to anchor 'today'.\n"
+            "2. Call list_tasks to load open tasks. Identify overdue tasks and tasks due today.\n"
+            "3. Rank by due date, then by urgency (time remaining vs. estimated duration).\n"
+            "4. Present a short prioritized list (most urgent first) with estimated durations.\n"
+            "5. Offer to adjust unrealistic due dates or split anything too large. Make changes only if asked."
+        ),
+    },
+    {
+        "name": "Break down a big task",
+        "description": "Split a large or vague task into concrete, estimable subtasks.",
+        "when_to_use": "When a task is too big/ambiguous to act on, or the user asks to break something down.",
+        "steps": (
+            "1. Identify the parent task (ask for its id or find it with list_tasks).\n"
+            "2. Propose 3-7 concrete subtasks. Confirm with the user if the breakdown is non-obvious.\n"
+            "3. Create each subtask with create_task, passing parent_task_id = the parent's id and a realistic duration_minutes.\n"
+            "4. Summarize the subtasks you created. Do not duplicate subtasks that already exist."
+        ),
+    },
+    {
+        "name": "Weekly cleanup",
+        "description": "Tidy the task list: find duplicates, stale, and completed clutter.",
+        "when_to_use": "When the user asks for a weekly review or to clean up / declutter their tasks.",
+        "steps": (
+            "1. Call list_tasks (and include_completed=true) to see the full picture.\n"
+            "2. Flag likely duplicates (same/similar title) and stale tasks (long overdue, no activity).\n"
+            "3. Propose a concise cleanup plan: which to merge/update and which to delete.\n"
+            "4. Only after the user confirms, apply updates/deletes. Respect the delete guardrails — do not delete tasks that are not in the current plan when a plan is open."
+        ),
+    },
+    {
+        "name": "Plan a project from a goal",
+        "description": "Turn a goal into tasks and a plan document with embedded task widgets.",
+        "when_to_use": "When the user describes a goal/outcome and wants a structured plan.",
+        "steps": (
+            "1. Clarify scope, deadline, and constraints if they are unclear.\n"
+            "2. Create every task first with create_task and collect the returned task_id values.\n"
+            "3. THEN call write_plan (or create_plan), placing a {{task:ID}} token on its own line where each task belongs. For a large browsable set, embed a {{tasklist ...}} block instead. Never write a task's title/date in plain text next to its token.\n"
+            "4. Use the real ids from step 2 only — never invent ids. Reply summarizing the plan."
+        ),
+    },
+]
+
+
+_SITE_TOOL_GUIDE: Dict[str, str] = {
+    "overview": (
+        "This is a personal task-management app. You act inside ONE project at a time. "
+        "You manage TASKS and (in planning mode) PLAN documents, and you can save and run ROUTINES. "
+        "Call get_help with a topic ('tasks', 'plans', 'routines', 'recurrence', 'rules') for detail."
+    ),
+    "tasks": (
+        "TASKS have: title (required), description, due_date (ISO datetime, UTC), duration_minutes "
+        "(estimate), parent_task_id (makes it a subtask), is_recurring + recurrence_rule, tags (list of "
+        "names — created automatically if new), is_completed.\n"
+        "- create_task: make a new task. For subtasks, set parent_task_id.\n"
+        "- update_task: change fields by task_id. Set is_completed=true to mark done (for RECURRING tasks, "
+        "tell the user to use the app's complete button so recurrence advances correctly).\n"
+        "- delete_task: permanently remove by id. Use exact ids from context; never guess.\n"
+        "- list_tasks: search/filter (include_completed, tag, search). Use it before answering questions.\n"
+        "Always resolve relative dates via get_current_datetime; never guess today's date."
+    ),
+    "plans": (
+        "PLANS are markdown documents that can embed live task widgets. Put a {{task:ID}} token on its own "
+        "line where a task should appear; the app renders it as a rich widget (title, due date, duration, "
+        "tags, timers, completion). NEVER restate a task's title/date/duration in plain text next to its "
+        "token.\n"
+        "- read_plan: get a plan's full markdown (context only shows the first 8000 chars).\n"
+        "- write_plan: replace or append the current plan's content (append=true to add at the end).\n"
+        "- create_plan: make a new plan.\n"
+        "SEARCHABLE TASK-LIST: for a browsable collection of many tasks (with a search box, tag filters and "
+        "sort controls), embed a task-list block instead of many inline tokens. Write a line "
+        "'{{tasklist sort=manual', then one 'task:ID' per line (single braces, NOT {{task:ID}}), then a "
+        "closing '}}' line. sort= may be manual, timeLeft, duration, dueDate, or direness. Use inline "
+        "{{task:ID}} for a few tasks mixed with prose; use a {{tasklist}} block for a large browsable set.\n"
+        "CREATE-THEN-EMBED: create tasks FIRST, read their returned ids, THEN write_plan with {{task:ID}} "
+        "tokens (or a {{tasklist}} block) using those exact ids. Every referenced id must already exist in "
+        "this project."
+    ),
+    "routines": (
+        "ROUTINES are saved playbooks you can run and author. Available routines are summarized in your "
+        "context under 'routines'.\n"
+        "- list_routines: see available routines (name, description, when_to_use).\n"
+        "- get_routine: read a routine's full steps by id or name, then follow them using the other tools.\n"
+        "- save_routine: create or update your OWN routine (name + steps; optional description/when_to_use). "
+        "Use scope='project' to limit it to this project, or 'global' (default) for all your projects.\n"
+        "When a user's request matches a routine's when_to_use, or they ask to 'run'/'do' a routine, call "
+        "get_routine and execute its steps. You cannot edit or delete built-in (system) routines."
+    ),
+    "recurrence": (
+        "Recurring tasks use recurrence_rule: DAILY, WEEKDAYS (Mon-Fri), WEEKLY, or MONTHLY, with "
+        "is_recurring=true. To complete a recurring task so the next occurrence is scheduled, tell the "
+        "user to use the app's complete button — do not just set is_completed."
+    ),
+    "rules": (
+        "HARD RULES you must follow:\n"
+        "- Operate ONLY within the current project. Never reference other projects/users or invent ids.\n"
+        "- When a plan is open, only delete tasks that are embedded in that plan via {{task:ID}} tokens.\n"
+        "- Every {{task:ID}} token must reference an existing task in this project.\n"
+        "- Never claim you created/embedded/changed something unless the matching tool call returned ok:true.\n"
+        "- Do not edit or delete built-in (system) routines; save your own under a new name instead.\n"
+        "- In approval mode, non-trivial changes are queued for the user to approve — describe what you'll do."
+    ),
+}
+
+
+def _routines_query(session: Session, user_id: int, project_id: Optional[int]):
+    """Routines visible in this context: the user's global routines plus any
+    scoped to the current project."""
+    q = session.query(AgentRoutine).filter(AgentRoutine.user_id == user_id)
+    if project_id is not None:
+        q = q.filter(
+            (AgentRoutine.project_id.is_(None)) | (AgentRoutine.project_id == project_id)
+        )
+    else:
+        q = q.filter(AgentRoutine.project_id.is_(None))
+    return q
+
+
+def _ensure_default_routines(session: Session, user_id: int) -> None:
+    """Seed the built-in routines for a user the first time they are needed."""
+    has_system = (
+        session.query(AgentRoutine.id)
+        .filter(AgentRoutine.user_id == user_id, AgentRoutine.is_system.is_(True))
+        .first()
+    )
+    if has_system:
+        return
+    for d in _DEFAULT_ROUTINES:
+        session.add(AgentRoutine(
+            user_id=user_id,
+            project_id=None,
+            name=d["name"],
+            description=d.get("description"),
+            when_to_use=d.get("when_to_use"),
+            steps=d.get("steps", ""),
+            is_system=True,
+            created_by="system",
+        ))
+    session.commit()
+
+
+def _serialize_routine(r: AgentRoutine, *, include_steps: bool = False) -> Dict[str, Any]:
+    data: Dict[str, Any] = {
+        "id": r.id,
+        "name": r.name,
+        "description": r.description,
+        "when_to_use": r.when_to_use,
+        "scope": "project" if r.project_id is not None else "global",
+        "project_id": r.project_id,
+        "is_system": bool(r.is_system),
+        "created_by": r.created_by,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
+    if include_steps:
+        data["steps"] = r.steps or ""
+    return data
+
+
+def _routines_brief(session: Session, user_id: int, project_id: Optional[int]) -> List[Dict[str, Any]]:
+    _ensure_default_routines(session, user_id)
+    rows = _routines_query(session, user_id, project_id).order_by(AgentRoutine.name.asc()).all()
+    return [_serialize_routine(r) for r in rows]
+
+
 def _build_project_context(
     *,
     mode: str,
@@ -437,6 +618,7 @@ def _build_project_context(
                 "project_id": project_id,
                 "tasks": [_serialize_task_brief(t) for t in tasks],
                 "overdue_count": len(overdue),
+                "routines": _routines_brief(session, user_id, project_id),
                 "plan_titles": [{"id": p.id, "title": p.title} for p in
                                 session.query(Plan).filter(Plan.project_id == project_id)
                                 .order_by(Plan.updated_at.desc()).limit(20).all()],
@@ -456,6 +638,7 @@ def _build_project_context(
                 for p in plans
             ],
             "other_plans": other_plans,
+            "routines": _routines_brief(session, user_id, project_id),
         }
 
     completed = (
@@ -524,6 +707,10 @@ TOOL GUIDELINES
 - For marking tasks done: call update_task with is_completed=true. For recurring tasks, tell the user to use the app's complete button so the recurrence advances correctly.
 - For any relative date ("today", "tomorrow", "next Monday"), use the current date/time provided to you (or call get_current_datetime) — never guess today's date.
 - Keep changes minimal. Don't delete tasks unless explicitly asked.
+
+ROUTINES & HELP
+- ROUTINES are saved playbooks. Available ones are summarized in your context under 'routines' (name, when_to_use). When a request matches a routine's when_to_use, or the user asks to "run"/"do" a routine, call get_routine to read its steps and follow them. You can save your own with save_routine, but never edit or delete built-in (system) routines.
+- Call get_help (optionally with a topic like 'tasks' or 'routines') whenever you are unsure how a tool or feature works.
 
 STYLE
 - Be brief and actionable. Bullet-point task lists when listing more than two items.
@@ -635,10 +822,45 @@ TASK WIDGET RENDERING — CRITICAL
   If yes, embed it with {{{{task:ID}}}} instead. Only use plain text for tasks
   that cannot be created (e.g. conceptual placeholders you have not yet
   decided to create).
+
+SEARCHABLE TASK-LIST BLOCKS
+  Besides inline {{{{task:ID}}}} tokens, you can embed a SEARCHABLE, SORTABLE
+  task-list: one widget that groups many tasks with a search box, tag filters
+  and sort controls. Use it when the user wants a browsable collection (e.g.
+  "a list of all my research tasks") rather than tasks interspersed with prose.
+  Syntax — the block opens with a line starting {{{{tasklist and ends with a }}}} line:
+    {{{{tasklist sort=manual
+    - task:123  Optional human label
+    - task:456
+    }}}}
+  Rules:
+    - Each member line references an existing task via task:ID using SINGLE
+      braces (task:123), NOT the {{{{task:ID}}}} widget form. Any trailing text is
+      just a label for you; the app renders the live widget regardless.
+    - Optional sort= is one of: manual, timeLeft, duration, dueDate, direness.
+    - The same CREATE-THEN-EMBED order applies: create the tasks first, then
+      write the block with their real ids. Unknown ids are rejected.
+    - Choose inline {{{{task:ID}}}} for a few tasks mixed with explanation; choose a
+      {{{{tasklist}}}} block for a larger set the user will want to search or sort.
 - For bulk or destructive changes, describe what you will do and ask for
   confirmation before calling tools.
 - Set durations and due dates realistically; flag when a deadline looks
   infeasible rather than silently packing the schedule.
+
+ROUTINES & HELP
+- ROUTINES are saved, reusable playbooks. The ones available to you are
+  summarized in your context under 'routines' (name, description, when_to_use).
+  When a user's request matches a routine's when_to_use, or they ask to
+  "run"/"do"/"follow" a routine, call get_routine (by id or name) to read its
+  full steps, then execute them using the other tools. Use list_routines to
+  browse what exists.
+- You may author your own routine with save_routine (name + steps; optional
+  description/when_to_use; scope='project' or 'global'). Save a routine when the
+  user asks you to remember a repeatable workflow. You must NEVER edit or delete
+  a built-in (is_system) routine — save your variant under a new name instead.
+- Whenever you are unsure how a tool, task/plan field, or feature works, call
+  get_help (optionally with a topic: 'tasks', 'plans', 'routines', 'recurrence',
+  or 'rules') rather than guessing.
 
 STYLE
 - Be concise and practical. Explain reasoning briefly, then act.
@@ -762,6 +984,91 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime.datetime]:
     return datetime.datetime.fromisoformat(normalized)
 
 
+def _routine_help_tools_schema() -> List[Dict[str, Any]]:
+    """Shared tools available in every mode: routines + on-demand documentation."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_help",
+                "description": (
+                    "Return documentation on how to use the app's tools and features. "
+                    "Call this whenever you are unsure how something works. Topics: "
+                    "'overview', 'tasks', 'plans', 'routines', 'recurrence', 'rules'. "
+                    "Omit topic to get the overview plus the list of topics."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "enum": ["overview", "tasks", "plans", "routines", "recurrence", "rules"],
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_routines",
+                "description": (
+                    "List the saved routines (reusable playbooks) available in this project, "
+                    "with their name, description, and when_to_use. Use this to discover a "
+                    "routine that matches the user's request."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_routine",
+                "description": (
+                    "Read a routine's full steps so you can follow them. Identify it by "
+                    "routine_id or by exact name. After reading, execute the steps using the "
+                    "other tools."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "routine_id": {"type": "integer"},
+                        "name": {"type": "string"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "save_routine",
+                "description": (
+                    "Create or update one of YOUR routines (a reusable playbook). Provide a "
+                    "name and steps; description and when_to_use are optional. Updates an "
+                    "existing routine when routine_id (or an exact matching name you own) is "
+                    "given, otherwise creates a new one. scope='project' limits it to this "
+                    "project; 'global' (default) makes it available in all your projects. You "
+                    "cannot modify built-in (system) routines — choose a new name instead."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "routine_id": {"type": "integer"},
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "when_to_use": {"type": "string"},
+                        "steps": {"type": "string"},
+                        "scope": {"type": "string", "enum": ["global", "project"]},
+                    },
+                    "required": ["name", "steps"],
+                },
+            },
+        },
+    ]
+
+
 def _planning_tools_schema() -> List[Dict[str, Any]]:
     return [
         {
@@ -840,6 +1147,10 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                     "Replace or append a plan's markdown content. To embed a task "
                     "as a live widget INLINE (interspersed with your text), put a "
                     "{{task:ID}} token on its own line exactly where you want it. "
+                    "For a browsable collection of many tasks, embed a SEARCHABLE "
+                    "task-list block instead: a line '{{tasklist sort=manual', then "
+                    "one 'task:ID' per line, then a closing '}}' line (sort= may be "
+                    "manual, timeLeft, duration, dueDate, or direness). "
                     "Every id must be an EXISTING task in this project (create it "
                     "first with create_task and use the returned id); referencing a "
                     "non-existent id is rejected. Prefer this over insert_task_into_plan "
@@ -863,8 +1174,9 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                 "name": "create_plan",
                 "description": (
                     "Create a new plan in the current project. You may embed existing "
-                    "tasks inline by placing {{task:ID}} tokens in the content; every "
-                    "id must already exist in this project."
+                    "tasks inline by placing {{task:ID}} tokens in the content, or embed "
+                    "a searchable task-list block ('{{tasklist sort=manual' ... 'task:ID' "
+                    "lines ... '}}'); every id must already exist in this project."
                 ),
                 "parameters": {
                     "type": "object",
@@ -940,7 +1252,7 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },
-    ]
+    ] + _routine_help_tools_schema()
 
 
 def _ensure_tag_ids(
@@ -971,9 +1283,13 @@ def _ensure_tag_ids(
 
 
 _TASK_TOKEN_RE = re.compile(r"\{\{task:(\d+)\}\}")
+# A searchable/sortable task-list block: {{tasklist sort=... \n - task:ID ... }}.
+_TASKLIST_BLOCK_RE = re.compile(r"\{\{tasklist[\s\S]*?\}\}")
+# A task reference inside a tasklist block member line (single-brace `task:ID`).
+_TASKLIST_MEMBER_RE = re.compile(r"task:(\d+)")
 
 # Tools that only read data — they execute immediately and never require approval.
-_READ_ONLY_TOOLS = {"read_plan", "list_tasks", "get_current_datetime"}
+_READ_ONLY_TOOLS = {"read_plan", "list_tasks", "get_current_datetime", "get_help", "list_routines", "get_routine"}
 
 # Tools that are safe to execute immediately even in approval mode because they
 # are additive and trivially reversible. Creating a task right away (instead of
@@ -993,8 +1309,12 @@ def _validate_plan_task_tokens(
     """Ensure every {{task:ID}} token in plan content references a task that
     actually exists in this project. This lets the agent place task widgets
     inline (interspersed with text) via write_plan/create_plan while still
-    preventing references to non-existent or other-project tasks."""
-    ids = {int(m.group(1)) for m in _TASK_TOKEN_RE.finditer(content or "")}
+    preventing references to non-existent or other-project tasks. The same
+    check covers task:ID member lines inside {{tasklist ...}} blocks."""
+    text = content or ""
+    ids = {int(m.group(1)) for m in _TASK_TOKEN_RE.finditer(text)}
+    for block in _TASKLIST_BLOCK_RE.finditer(text):
+        ids.update(int(m.group(1)) for m in _TASKLIST_MEMBER_RE.finditer(block.group(0)))
     if not ids:
         return
     found = {
@@ -1036,6 +1356,147 @@ def _execute_planning_tool_call(
             "date": now.date().isoformat(),
             "weekday": now.strftime("%A"),
             "note": "Times are UTC. Task due dates are stored in UTC.",
+        }
+
+    if name == "get_help":
+        topic = (args.get("topic") or "").strip().lower()
+        if topic and topic in _SITE_TOOL_GUIDE:
+            return {
+                "ok": True,
+                "action": "get_help",
+                "topic": topic,
+                "content": _SITE_TOOL_GUIDE[topic],
+            }
+        return {
+            "ok": True,
+            "action": "get_help",
+            "topic": "overview",
+            "content": _SITE_TOOL_GUIDE["overview"],
+            "topics": [t for t in _SITE_TOOL_GUIDE.keys() if t != "overview"],
+        }
+
+    if name == "list_routines":
+        _ensure_default_routines(session, user_id)
+        rows = _routines_query(session, user_id, project_id).order_by(AgentRoutine.name.asc()).all()
+        return {
+            "ok": True,
+            "action": "list_routines",
+            "count": len(rows),
+            "routines": [_serialize_routine(r) for r in rows],
+        }
+
+    if name == "get_routine":
+        _ensure_default_routines(session, user_id)
+        routine_id = args.get("routine_id")
+        routine = None
+        if isinstance(routine_id, int):
+            routine = _routines_query(session, user_id, project_id).filter(
+                AgentRoutine.id == routine_id
+            ).first()
+        elif args.get("name"):
+            wanted = str(args.get("name")).strip().lower()
+            routine = next(
+                (r for r in _routines_query(session, user_id, project_id).all()
+                 if (r.name or "").strip().lower() == wanted),
+                None,
+            )
+        else:
+            raise HTTPException(status_code=400, detail="get_routine requires routine_id or name")
+        if not routine:
+            raise HTTPException(status_code=404, detail="Routine not found")
+        return {
+            "ok": True,
+            "action": "get_routine",
+            "routine": _serialize_routine(routine, include_steps=True),
+        }
+
+    if name == "save_routine":
+        r_name = str(args.get("name") or "").strip()
+        steps = str(args.get("steps") or "").strip()
+        if not r_name:
+            raise HTTPException(status_code=400, detail="save_routine requires a name")
+        if not steps:
+            raise HTTPException(status_code=400, detail="save_routine requires steps")
+        if len(r_name) > _ROUTINE_NAME_MAX:
+            raise HTTPException(status_code=400, detail=f"Routine name too long (max {_ROUTINE_NAME_MAX} chars)")
+        if len(steps) > _ROUTINE_STEPS_MAX:
+            raise HTTPException(status_code=400, detail=f"Routine steps too long (max {_ROUTINE_STEPS_MAX} chars)")
+        description = args.get("description")
+        when_to_use = args.get("when_to_use")
+        if description is not None:
+            description = str(description)[:_ROUTINE_TEXT_MAX]
+        if when_to_use is not None:
+            when_to_use = str(when_to_use)[:_ROUTINE_TEXT_MAX]
+        scope = str(args.get("scope") or "global").strip().lower()
+        target_project_id = project_id if scope == "project" else None
+
+        # Locate an existing routine to update: explicit id, else an exact
+        # name match the user owns. Built-in (system) routines are read-only.
+        _ensure_default_routines(session, user_id)
+        routine_id = args.get("routine_id")
+        existing: Optional[AgentRoutine] = None
+        if isinstance(routine_id, int):
+            existing = session.query(AgentRoutine).filter(
+                AgentRoutine.id == routine_id, AgentRoutine.user_id == user_id
+            ).first()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Routine not found")
+        else:
+            wanted = r_name.lower()
+            existing = next(
+                (r for r in session.query(AgentRoutine).filter(AgentRoutine.user_id == user_id).all()
+                 if (r.name or "").strip().lower() == wanted),
+                None,
+            )
+        if existing is not None and existing.is_system:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"'{existing.name}' is a built-in routine and cannot be modified. "
+                    "Save your version under a different name."
+                ),
+            )
+
+        if dry_run:
+            return {
+                "ok": True,
+                "action": "save_routine",
+                "dry_run": True,
+                "name": r_name,
+                "scope": scope if scope in ("project", "global") else "global",
+                "update": existing is not None,
+            }
+
+        now = datetime.datetime.utcnow()
+        if existing is not None:
+            existing.name = r_name
+            existing.description = description
+            existing.when_to_use = when_to_use
+            existing.steps = steps
+            existing.project_id = target_project_id
+            existing.updated_at = now
+            routine = existing
+        else:
+            routine = AgentRoutine(
+                user_id=user_id,
+                project_id=target_project_id,
+                name=r_name,
+                description=description,
+                when_to_use=when_to_use,
+                steps=steps,
+                is_system=False,
+                created_by="agent",
+            )
+            session.add(routine)
+        session.commit()
+        session.refresh(routine)
+        return {
+            "ok": True,
+            "action": "save_routine",
+            "routine_id": routine.id,
+            "name": routine.name,
+            "scope": "project" if routine.project_id is not None else "global",
+            "updated": existing is not None,
         }
 
     if name == "create_task":
@@ -1439,7 +1900,7 @@ def _todo_tools_schema() -> List[Dict[str, Any]]:
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },
-    ]
+    ] + _routine_help_tools_schema()
 
 
 # ── Persistent conversation memory ────────────────────────────────────────────
@@ -1945,6 +2406,145 @@ async def delete_agent_settings(
         user.llm_model = None
         session.commit()
     return {"ok": True, "using_own_key": False}
+
+
+# ── Routines (reusable agent playbooks) ───────────────────────────────────────
+
+class RoutineCreate(BaseModel):
+    name: str
+    steps: str
+    description: Optional[str] = None
+    when_to_use: Optional[str] = None
+    project_id: Optional[int] = None  # None = global (all the user's projects)
+
+
+class RoutineUpdate(BaseModel):
+    name: Optional[str] = None
+    steps: Optional[str] = None
+    description: Optional[str] = None
+    when_to_use: Optional[str] = None
+    project_id: Optional[int] = None
+    scope: Optional[Literal["global", "project"]] = None
+
+
+def _validate_routine_fields(name: Optional[str], steps: Optional[str]) -> None:
+    if name is not None and len(name) > _ROUTINE_NAME_MAX:
+        raise HTTPException(status_code=400, detail=f"Routine name too long (max {_ROUTINE_NAME_MAX} chars)")
+    if steps is not None and len(steps) > _ROUTINE_STEPS_MAX:
+        raise HTTPException(status_code=400, detail=f"Routine steps too long (max {_ROUTINE_STEPS_MAX} chars)")
+
+
+@router.get("/routines")
+async def list_routines_endpoint(
+    project_id: Optional[int] = None,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    """List the user's routines (globals plus, if project_id is given, that
+    project's routines). Seeds the built-in defaults on first use."""
+    if project_id is not None:
+        _assert_project_member(project_id, user_id, session)
+    _ensure_default_routines(session, user_id)
+    rows = _routines_query(session, user_id, project_id).order_by(
+        AgentRoutine.is_system.desc(), AgentRoutine.name.asc()
+    ).all()
+    return [_serialize_routine(r, include_steps=True) for r in rows]
+
+
+@router.post("/routines")
+async def create_routine_endpoint(
+    body: RoutineCreate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    name = (body.name or "").strip()
+    steps = (body.steps or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Routine name is required")
+    if not steps:
+        raise HTTPException(status_code=400, detail="Routine steps are required")
+    _validate_routine_fields(name, steps)
+    if body.project_id is not None:
+        _assert_project_member(body.project_id, user_id, session)
+    routine = AgentRoutine(
+        user_id=user_id,
+        project_id=body.project_id,
+        name=name,
+        description=(body.description[:_ROUTINE_TEXT_MAX] if body.description else None),
+        when_to_use=(body.when_to_use[:_ROUTINE_TEXT_MAX] if body.when_to_use else None),
+        steps=steps,
+        is_system=False,
+        created_by="user",
+    )
+    session.add(routine)
+    session.commit()
+    session.refresh(routine)
+    return _serialize_routine(routine, include_steps=True)
+
+
+@router.put("/routines/{routine_id}")
+async def update_routine_endpoint(
+    routine_id: int,
+    body: RoutineUpdate,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    routine = session.query(AgentRoutine).filter(
+        AgentRoutine.id == routine_id, AgentRoutine.user_id == user_id
+    ).first()
+    if not routine:
+        raise HTTPException(status_code=404, detail="Routine not found")
+    if routine.is_system:
+        raise HTTPException(status_code=403, detail="Built-in routines cannot be modified")
+    _validate_routine_fields(body.name, body.steps)
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Routine name cannot be empty")
+        routine.name = name
+    if body.steps is not None:
+        steps = body.steps.strip()
+        if not steps:
+            raise HTTPException(status_code=400, detail="Routine steps cannot be empty")
+        routine.steps = steps
+    if body.description is not None:
+        routine.description = body.description[:_ROUTINE_TEXT_MAX] or None
+    if body.when_to_use is not None:
+        routine.when_to_use = body.when_to_use[:_ROUTINE_TEXT_MAX] or None
+    if body.scope is not None:
+        if body.scope == "project":
+            pid = body.project_id if body.project_id is not None else routine.project_id
+            if pid is None:
+                raise HTTPException(status_code=400, detail="project scope requires a project_id")
+            _assert_project_member(pid, user_id, session)
+            routine.project_id = pid
+        else:
+            routine.project_id = None
+    elif body.project_id is not None:
+        _assert_project_member(body.project_id, user_id, session)
+        routine.project_id = body.project_id
+    routine.updated_at = datetime.datetime.utcnow()
+    session.commit()
+    session.refresh(routine)
+    return _serialize_routine(routine, include_steps=True)
+
+
+@router.delete("/routines/{routine_id}")
+async def delete_routine_endpoint(
+    routine_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: Session = Depends(get_session),
+):
+    routine = session.query(AgentRoutine).filter(
+        AgentRoutine.id == routine_id, AgentRoutine.user_id == user_id
+    ).first()
+    if not routine:
+        raise HTTPException(status_code=404, detail="Routine not found")
+    if routine.is_system:
+        raise HTTPException(status_code=403, detail="Built-in routines cannot be deleted")
+    session.delete(routine)
+    session.commit()
+    return {"ok": True}
 
 
 @router.post("/planning/apply-actions")

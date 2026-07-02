@@ -63,8 +63,9 @@ class User(Base):
     plans = relationship("Plan", back_populates="user", cascade="all, delete-orphan")
     llm_conversations = relationship("LLMConversation", back_populates="user", cascade="all, delete-orphan")
     accounts = relationship("Account", back_populates="user", cascade="all, delete-orphan")
-    budget_goals = relationship("BudgetGoal", back_populates="user", cascade="all, delete-orphan")
     project_memberships = relationship("ProjectMembership", back_populates="user", cascade="all, delete-orphan")
+    budget_goals = relationship("BudgetGoal", back_populates="user", cascade="all, delete-orphan")
+    agent_routines = relationship("AgentRoutine", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
@@ -374,6 +375,39 @@ class LLMUsage(Base):
 
     def __repr__(self):
         return f"<LLMUsage(id={self.id}, model={self.model}, cost=${self.cost_usd:.4f})>"
+
+
+class AgentRoutine(Base):
+    """A saved, reusable playbook the LLM agent can read and execute.
+
+    Routines are owned by a user and are global by default (project_id NULL),
+    meaning they apply across all of that user's projects. They may optionally
+    be scoped to a single project. Built-in routines (is_system=True) are seeded
+    defaults that the agent may read and run but must not edit or delete.
+    """
+    __tablename__ = "agent_routines"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    # NULL = global (all of the user's projects); otherwise scoped to one project.
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    when_to_use = Column(Text, nullable=True)      # guidance on when this routine applies
+    steps = Column(Text, nullable=False, default="")  # the playbook the agent follows
+    is_system = Column(Boolean, nullable=False, default=False)  # seeded default; read-only to the agent
+    created_by = Column(String, nullable=False, default="user")  # "user" | "agent" | "system"
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow,
+    )
+
+    user = relationship("User", back_populates="agent_routines")
+
+    def __repr__(self):
+        return f"<AgentRoutine(id={self.id}, name='{self.name}', system={self.is_system})>"
 
 
 
