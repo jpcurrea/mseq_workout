@@ -143,6 +143,12 @@ class _TaskListViewState extends State<TaskListView> {
   bool _flatView = false;
   bool _expandAll = false;
 
+  /// Due-date horizon for which tasks to show (upper bound only; overdue and
+  /// undated tasks always remain visible). One of: day, week, month, year,
+  /// lifetime.
+  String _timeScale = 'lifetime';
+  static const List<String> _timeScaleOrder = ['day', 'week', 'month', 'year', 'lifetime'];
+
   /// Ids last reported via [TaskListView.onDisplayedTasksChanged]; used to avoid
   /// redundant notifications.
   List<int> _lastNotifiedIds = const [];
@@ -150,6 +156,7 @@ class _TaskListViewState extends State<TaskListView> {
   String get _kSort => '${widget.prefsKeyPrefix}_sort_mode';
   String get _kFlat => '${widget.prefsKeyPrefix}_flat_view';
   String get _kExpand => '${widget.prefsKeyPrefix}_expand_all';
+  String get _kScale => '${widget.prefsKeyPrefix}_time_scale';
 
   @override
   void initState() {
@@ -175,7 +182,15 @@ class _TaskListViewState extends State<TaskListView> {
         (m) => m.name == sortName,
         orElse: () => widget.initialSortMode ?? TaskSortMode.timeLeft,
       );
+      final scaleName = prefs.getString(_kScale);
+      _timeScale = _timeScaleOrder.contains(scaleName) ? scaleName! : 'lifetime';
     });
+  }
+
+  Future<void> _setTimeScale(String scale) async {
+    setState(() => _timeScale = scale);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kScale, scale);
   }
 
   Future<void> _setSortMode(TaskSortMode mode) async {
@@ -366,6 +381,45 @@ class _TaskListViewState extends State<TaskListView> {
     return t.subtasks.any(_treeMatchesSearch);
   }
 
+  /// The latest due date included for the current time scale, or null (no limit).
+  DateTime? _timeScaleCutoff() {
+    final now = DateTime.now();
+    switch (_timeScale) {
+      case 'day':
+        return DateTime(now.year, now.month, now.day, 23, 59, 59);
+      case 'week':
+        final end = now.add(Duration(days: 7 - now.weekday)); // through Sunday
+        return DateTime(end.year, end.month, end.day, 23, 59, 59);
+      case 'month':
+        final firstNext = now.month == 12
+            ? DateTime(now.year + 1, 1, 1)
+            : DateTime(now.year, now.month + 1, 1);
+        final last = firstNext.subtract(const Duration(days: 1));
+        return DateTime(last.year, last.month, last.day, 23, 59, 59);
+      case 'year':
+        return DateTime(now.year, 12, 31, 23, 59, 59);
+      case 'lifetime':
+      default:
+        return null;
+    }
+  }
+
+  /// Whether a task falls within the selected horizon. Undated tasks always
+  /// pass; dated tasks pass when due on or before the cutoff (so overdue tasks
+  /// are always kept — it is purely an upper bound).
+  bool _matchesTimeScale(Task t) {
+    final cutoff = _timeScaleCutoff();
+    if (cutoff == null) return true;
+    final due = t.dueDate;
+    if (due == null) return true;
+    return !due.toLocal().isAfter(cutoff);
+  }
+
+  bool _treeMatchesTimeScale(Task t) {
+    if (_matchesTimeScale(t)) return true;
+    return t.subtasks.any(_treeMatchesTimeScale);
+  }
+
   void _flatten(Task t, List<Task> out) {
     out.add(t);
     for (final s in t.subtasks) {
@@ -382,12 +436,12 @@ class _TaskListViewState extends State<TaskListView> {
         _flatten(t, all);
       }
       final filtered =
-          all.where((t) => _matchesTagFilter(t) && _matchesSearch(t)).toList();
+          all.where((t) => _matchesTagFilter(t) && _matchesSearch(t) && _matchesTimeScale(t)).toList();
       filtered.sort((a, b) => _cmpTask(a, b, now));
       return filtered;
     }
     final roots = widget.tasks
-        .where((t) => _treeMatchesTagFilter(t) && _treeMatchesSearch(t))
+        .where((t) => _treeMatchesTagFilter(t) && _treeMatchesSearch(t) && _treeMatchesTimeScale(t))
         .toList();
     roots.sort((a, b) {
       if (_sortMode == TaskSortMode.manual) {
@@ -432,14 +486,7 @@ class _TaskListViewState extends State<TaskListView> {
       children = [_buildCompactBar(context)];
     } else {
       children = [
-        _TaskSearchBar(
-          controller: _searchCtrl,
-          onChanged: (v) => setState(() => _searchQuery = v),
-          onClear: () => setState(() {
-            _searchCtrl.clear();
-            _searchQuery = '';
-          }),
-        ),
+        _buildSearchAndScaleBar(context),
         _TaskSortBar(
           sortMode: _sortMode,
           onSortSelected: _setSortMode,
@@ -469,6 +516,56 @@ class _TaskListViewState extends State<TaskListView> {
 
     children.add(Expanded(child: _buildList(shrinkWrap: false)));
     return Column(children: children);
+  }
+
+  /// The full-list header: the search box, with the "show tasks due this:"
+  /// time-scale slider to its right. When the row is too narrow to give the
+  /// search box ~2 inches and the slider ~1 inch, the slider wraps below.
+  Widget _buildSearchAndScaleBar(BuildContext context) {
+    const double searchMin = 192; // ~2 inches at 96 logical px/in
+    const double sliderMin = 96; //  ~1 inch
+    const double gap = 12;
+    final search = _TaskSearchBar(
+      controller: _searchCtrl,
+      onChanged: (v) => setState(() => _searchQuery = v),
+      onClear: () => setState(() {
+        _searchCtrl.clear();
+        _searchQuery = '';
+      }),
+      padded: false,
+    );
+    final slider = _TimeScaleSlider(
+      scale: _timeScale,
+      order: _timeScaleOrder,
+      onChanged: _setTimeScale,
+    );
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final canFitSideBySide =
+              constraints.maxWidth >= searchMin + sliderMin + gap;
+          if (canFitSideBySide) {
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(flex: 2, child: search),
+                const SizedBox(width: gap),
+                Expanded(flex: 1, child: slider),
+              ],
+            );
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              search,
+              const SizedBox(height: 6),
+              slider,
+            ],
+          );
+        },
+      ),
+    );
   }
 
   /// A single-row control bar used in embedded mode: search field, then the
@@ -809,38 +906,96 @@ class _TaskSearchBar extends StatelessWidget {
   final ValueChanged<String> onChanged;
   final VoidCallback onClear;
 
+  /// When false the outer padding is omitted so the caller can lay the field
+  /// out alongside other controls.
+  final bool padded;
+
   const _TaskSearchBar({
     required this.controller,
     required this.onChanged,
     required this.onClear,
+    this.padded = true,
   });
 
   @override
   Widget build(BuildContext context) {
+    final field = TextField(
+      controller: controller,
+      onChanged: onChanged,
+      textInputAction: TextInputAction.search,
+      decoration: InputDecoration(
+        isDense: true,
+        hintText: 'Search title, description, tags, dates…',
+        prefixIcon: const Icon(Icons.search, size: 20),
+        suffixIcon: controller.text.isEmpty
+            ? Tooltip(
+                message: 'Use "quotes" for phrases and AND / OR for advanced queries',
+                child: Icon(Icons.info_outline, size: 18, color: Colors.grey[500]),
+              )
+            : IconButton(
+                icon: const Icon(Icons.clear, size: 18),
+                tooltip: 'Clear search',
+                onPressed: onClear,
+              ),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      ),
+    );
+    if (!padded) return field;
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      child: TextField(
-        controller: controller,
-        onChanged: onChanged,
-        textInputAction: TextInputAction.search,
-        decoration: InputDecoration(
-          isDense: true,
-          hintText: 'Search title, description, tags, dates…',
-          prefixIcon: const Icon(Icons.search, size: 20),
-          suffixIcon: controller.text.isEmpty
-              ? Tooltip(
-                  message: 'Use "quotes" for phrases and AND / OR for advanced queries',
-                  child: Icon(Icons.info_outline, size: 18, color: Colors.grey[500]),
-                )
-              : IconButton(
-                  icon: const Icon(Icons.clear, size: 18),
-                  tooltip: 'Clear search',
-                  onPressed: onClear,
-                ),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: field,
+    );
+  }
+}
+
+/// Compact "Show tasks due this:" slider used beside the search box to pick the
+/// due-date horizon (day / week / month / year / lifetime).
+class _TimeScaleSlider extends StatelessWidget {
+  final String scale;
+  final List<String> order;
+  final ValueChanged<String> onChanged;
+
+  const _TimeScaleSlider({
+    required this.scale,
+    required this.order,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final idx = order.indexOf(scale).clamp(0, order.length - 1);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Show tasks due this: ${order[idx]}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
         ),
-      ),
+        SizedBox(
+          height: 28,
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+            ),
+            child: Slider(
+              value: idx.toDouble(),
+              min: 0,
+              max: (order.length - 1).toDouble(),
+              divisions: order.length - 1,
+              label: order[idx],
+              onChanged: (v) => onChanged(order[v.round()]),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

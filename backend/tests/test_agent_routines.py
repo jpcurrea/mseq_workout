@@ -225,3 +225,29 @@ def test_write_plan_rejects_unknown_tasklist_member(db, user, project, plan):
             db=db, user=user, project=project, plan=plan,
         )
     assert exc.value.status_code == 400
+
+
+def test_write_plan_auto_annotates_missing_tasklist_titles(db, user, project, plan, task):
+    # A bare `- task:ID` line (no label) should get the task title appended.
+    content = "{{tasklist sort=manual\n" f"- task:{task.id}\n" "}}"
+    _call(
+        "write_plan",
+        {"plan_id": plan.id, "content": content},
+        db=db, user=user, project=project, plan=plan,
+    )
+    db.refresh(plan)
+    assert f"- task:{task.id}  {task.title}" in plan.content
+
+
+def test_write_plan_preserves_existing_tasklist_label(db, user, project, plan, task):
+    # An explicit custom label must NOT be overwritten.
+    content = "{{tasklist sort=manual\n" f"- task:{task.id}  My custom note\n" "}}"
+    _call(
+        "write_plan",
+        {"plan_id": plan.id, "content": content},
+        db=db, user=user, project=project, plan=plan,
+    )
+    db.refresh(plan)
+    assert "My custom note" in plan.content
+    assert f"task:{task.id}  {task.title}" not in plan.content
+

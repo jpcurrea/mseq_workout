@@ -72,6 +72,7 @@ from database import (
 )
 from dependencies import get_current_user_id
 from auth import SECRET_KEY
+from plan_utils import annotate_tasklist_titles
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 _config = Config('.env')
@@ -707,6 +708,7 @@ TOOL GUIDELINES
 - For marking tasks done: call update_task with is_completed=true. For recurring tasks, tell the user to use the app's complete button so the recurrence advances correctly.
 - For any relative date ("today", "tomorrow", "next Monday"), use the current date/time provided to you (or call get_current_datetime) — never guess today's date.
 - Keep changes minimal. Don't delete tasks unless explicitly asked.
+- PLAN DOCUMENTS: you are in the todo list and CANNOT edit plan documents here. If the user asks you to "make a plan" or "update the plan", do not paste a plan into the chat. Briefly explain that plan documents are edited in the Plans view's Planning Agent, and offer to create the individual tasks here instead.
 
 ROUTINES & HELP
 - ROUTINES are saved playbooks. Available ones are summarized in your context under 'routines' (name, when_to_use). When a request matches a routine's when_to_use, or the user asks to "run"/"do" a routine, call get_routine to read its steps and follow them. You can save your own with save_routine, but never edit or delete built-in (system) routines.
@@ -721,6 +723,23 @@ STYLE
     return f"""You are the planning assistant for a personal task-management app.
 You help the user break goals into tasks, set realistic durations and due
 dates, and organize their plan. The current mode is '{mode}'.
+
+WHAT "THE PLAN" IS (read this first)
+- "The plan" ALWAYS means the actual markdown PLAN DOCUMENT the user is looking
+  at — a real file you change with the write_plan tool (or create_plan when no
+  plan is open). It is NEVER your chat message.
+- When the user says "make a plan", "make a plan for today", "update the plan",
+  "rewrite the plan", "fill in the plan", or "add these to the plan", they want
+  the DOCUMENT edited. You MUST do it with a write_plan/create_plan tool call.
+  Writing the plan into your chat reply does nothing to the document and counts
+  as failing the request — never do that.
+- If you need information before you can write it (which date, priorities, scope,
+  how long tasks take), ASK the user short, specific questions in chat and wait
+  for their answers. Do NOT paste a full draft plan as a "proposal" in chat.
+  Once they answer, apply the plan with write_plan.
+- Right: create the tasks, call write_plan with the full content, then reply
+  "Done — I built today's plan with 5 tasks." Wrong: replying with the plan's
+  markdown and no write_plan call.
 
 SCOPE
 - You operate ONLY within project_id={project_id}. Never read, reference, or
@@ -761,6 +780,18 @@ SAFETY
   attempt clinical counseling.
 
 ACTIONS & APPROVAL
+- APPLYING PLAN CHANGES — CRITICAL (re-read this whenever a plan is involved):
+  To create, write, update, rewrite, fill in, or otherwise change a plan you
+  MUST call write_plan (or create_plan for a brand-new plan). That tool call is
+  the ONLY thing that changes the document. NEVER paste the plan's markdown into
+  your chat reply as a substitute — your chat message is not the plan. Printing
+  plan content in the chat changes nothing, leaves the user's plan untouched,
+  and counts as failing the request. When the user says things like "update the
+  plan for today", "rewrite the plan", or "add these to the plan": (1) create any
+  new tasks with create_task, (2) call write_plan with the FULL updated content,
+  then (3) reply with a SHORT confirmation of what changed — do not dump the plan
+  body back into the chat. Only skip write_plan if the user explicitly asked
+  merely to preview or brainstorm without changing the document, and say so.
 - Prefer the smallest set of changes that satisfies the request. Do not delete
   or overwrite existing tasks/plans unless explicitly asked.
 - Before creating a task, check the provided project context for an existing
@@ -836,7 +867,9 @@ SEARCHABLE TASK-LIST BLOCKS
   Rules:
     - Each member line references an existing task via task:ID using SINGLE
       braces (task:123), NOT the {{{{task:ID}}}} widget form. Any trailing text is
-      just a label for you; the app renders the live widget regardless.
+      just a label for you; the app renders the live widget regardless. If you
+      leave the label off, the app automatically fills in the task's title, so a
+      bare '- task:123' line is fine.
     - Optional sort= is one of: manual, timeLeft, duration, dueDate, direness.
     - The same CREATE-THEN-EMBED order applies: create the tasks first, then
       write the block with their real ids. Unknown ids are rejected.
@@ -1659,6 +1692,7 @@ def _execute_planning_tool_call(
             }
 
         plan.content = f"{plan.content.rstrip()}\n\n{content}" if append and plan.content else content
+        plan.content = annotate_tasklist_titles(plan.content, project_id=project_id, session=session)
         if "title" in args and args.get("title"):
             plan.title = str(args.get("title"))
         plan.updated_at = datetime.datetime.utcnow()
@@ -1680,6 +1714,7 @@ def _execute_planning_tool_call(
             }
 
         plan = Plan(user_id=user_id, project_id=project_id, title=title, content=content)
+        plan.content = annotate_tasklist_titles(content, project_id=project_id, session=session)
         session.add(plan)
         session.commit()
         session.refresh(plan)

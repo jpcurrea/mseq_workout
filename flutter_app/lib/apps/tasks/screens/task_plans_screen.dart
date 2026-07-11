@@ -309,6 +309,11 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
   bool _agentRequireApproval = true;
   bool _agentHasMemory = false;
 
+  // Resizable chat panel body height.
+  static const double _chatMinHeight = 120;
+  static const double _chatDefaultHeight = 180;
+  double _chatBodyHeight = _chatDefaultHeight;
+
   @override
   void initState() {
     super.initState();
@@ -324,7 +329,17 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     setState(() {
       _timeUnit = p.getString('task_time_unit') ?? 'hours';
       _agentRequireApproval = p.getBool('task_agent_require_approval') ?? true;
+      _chatBodyHeight = p.getDouble('plan_chat_height') ?? _chatDefaultHeight;
     });
+  }
+
+  Future<void> _saveChatHeight() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setDouble('plan_chat_height', _chatBodyHeight);
+    } catch (_) {
+      // Non-fatal.
+    }
   }
 
   @override
@@ -1245,6 +1260,40 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
     );
   }
 
+  /// A draggable grip along the top edge that stretches the chat panel up/down.
+  Widget _buildChatResizeHandle(ThemeData theme) {
+    final maxHeight = (MediaQuery.of(context).size.height * 0.7)
+        .clamp(_chatMinHeight, double.infinity)
+        .toDouble();
+    if (_chatBodyHeight > maxHeight) _chatBodyHeight = maxHeight;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeUpDown,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onVerticalDragUpdate: (details) {
+          setState(() {
+            _chatBodyHeight =
+                (_chatBodyHeight - details.delta.dy).clamp(_chatMinHeight, maxHeight).toDouble();
+          });
+        },
+        onVerticalDragEnd: (_) => _saveChatHeight(),
+        child: Container(
+          width: double.infinity,
+          height: 18,
+          alignment: Alignment.center,
+          child: Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.outline,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildAgentChatBox() {
     final theme = Theme.of(context);
     return Container(
@@ -1309,8 +1358,9 @@ class _PlanEditorScreenState extends State<_PlanEditorScreen> {
             ),
           ),
           if (_chatExpanded) ...[
+            _buildChatResizeHandle(theme),
             SizedBox(
-              height: 180,
+              height: _chatBodyHeight,
               child: _chatEntries.isEmpty
                   ? const Center(
                       child: Text(

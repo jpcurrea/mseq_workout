@@ -28,6 +28,7 @@ from database import (
     task_tag_link,
 )
 from dependencies import get_current_user_id
+from plan_utils import annotate_tasklist_titles
 
 tasks_router = APIRouter(prefix="/tasks", tags=["tasks"])
 plans_router = APIRouter(prefix="/plans", tags=["plans"])
@@ -1890,7 +1891,8 @@ async def create_plan(
     session: Session = Depends(get_session),
 ):
     _assert_can_write(body.project_id, user_id, session)
-    plan = Plan(user_id=user_id, project_id=body.project_id, title=body.title, content=body.content)
+    content = annotate_tasklist_titles(body.content, project_id=body.project_id, session=session)
+    plan = Plan(user_id=user_id, project_id=body.project_id, title=body.title, content=content)
     session.add(plan)
     session.commit()
     session.refresh(plan)
@@ -1949,22 +1951,24 @@ async def update_plan(
     _assert_can_write(plan.project_id, user_id, session)
     if body.title is not None:
         plan.title = body.title
-    if body.content is not None and body.content != plan.content:
-        old_lines = (plan.content or "").splitlines()
-        new_lines = body.content.splitlines()
-        diff_lines = list(difflib.unified_diff(
-            old_lines, new_lines,
-            fromfile="before", tofile="after",
-            lineterm="",
-        ))
-        if diff_lines:
-            session.add(PlanRevision(
-                plan_id=plan.id,
-                saved_by=user_id,
-                saved_at=datetime.datetime.utcnow(),
-                diff="\n".join(diff_lines),
+    if body.content is not None:
+        new_content = annotate_tasklist_titles(body.content, project_id=plan.project_id, session=session)
+        if new_content != plan.content:
+            old_lines = (plan.content or "").splitlines()
+            new_lines = new_content.splitlines()
+            diff_lines = list(difflib.unified_diff(
+                old_lines, new_lines,
+                fromfile="before", tofile="after",
+                lineterm="",
             ))
-        plan.content = body.content
+            if diff_lines:
+                session.add(PlanRevision(
+                    plan_id=plan.id,
+                    saved_by=user_id,
+                    saved_at=datetime.datetime.utcnow(),
+                    diff="\n".join(diff_lines),
+                ))
+            plan.content = new_content
     plan.updated_at = datetime.datetime.utcnow()
     session.commit()
     return {

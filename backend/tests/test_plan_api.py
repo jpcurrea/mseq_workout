@@ -157,6 +157,32 @@ def test_update_plan_content(http_client):
     assert data["id"] == plan.id
 
 
+def test_update_plan_auto_annotates_tasklist_titles(http_client):
+    """Saving a plan (outside the agent) auto-fills task titles in tasklist blocks."""
+    client, ctx = http_client
+    plan = ctx["plan"]
+    task = ctx["task"]
+    content = "{{tasklist sort=manual\n" f"- task:{task.id}\n" "}}"
+    resp = client.put(f"/plans/{plan.id}", json={"content": content})
+    assert resp.status_code == 200
+    got = client.get(f"/plans/{plan.id}").json()
+    assert f"- task:{task.id}  {task.title}" in got["content"]
+
+
+def test_create_plan_auto_annotates_tasklist_titles(http_client):
+    client, ctx = http_client
+    task = ctx["task"]
+    content = "{{tasklist sort=manual\n" f"- task:{task.id}\n" "}}"
+    resp = client.post(
+        "/plans",
+        json={"project_id": ctx["project"].id, "title": "Annotated", "content": content},
+    )
+    assert resp.status_code in (200, 201)
+    pid = resp.json()["id"]
+    got = client.get(f"/plans/{pid}").json()
+    assert f"- task:{task.id}  {task.title}" in got["content"]
+
+
 # ── DELETE /plans/{id} ────────────────────────────────────────────────────────
 
 def test_delete_plan(http_client):
