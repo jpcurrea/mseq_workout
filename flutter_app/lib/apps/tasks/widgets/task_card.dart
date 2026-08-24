@@ -1285,6 +1285,13 @@ String _timeLeftShortFromDate(DateTime? due) {
   if (due == null) return '—';
   final dueLocal = due.toLocal();
   final now = DateTime.now();
+  // When the task is due in less than a day (and not yet overdue), show the
+  // number of hours left rounded to 1 decimal place (e.g. "1.4 hrs").
+  final diff = dueLocal.difference(now);
+  if (!diff.isNegative && diff.inHours < 24) {
+    final hrs = diff.inMinutes / 60.0;
+    return '${hrs.toStringAsFixed(1)} hrs';
+  }
   // Compare by calendar day, not a rolling 24-hour window, so a task due early
   // tomorrow doesn't read as "Today" just because it's <24h away.
   final dueDay = DateTime(dueLocal.year, dueLocal.month, dueLocal.day);
