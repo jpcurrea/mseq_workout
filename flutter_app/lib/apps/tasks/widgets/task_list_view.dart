@@ -404,14 +404,15 @@ class _TaskListViewState extends State<TaskListView> {
     }
   }
 
-  /// Whether a task falls within the selected horizon. Undated tasks always
-  /// pass; dated tasks pass when due on or before the cutoff (so overdue tasks
-  /// are always kept — it is purely an upper bound).
+  /// Whether a task falls within the selected horizon. Undated tasks are treated
+  /// as due at infinite time and are excluded when a horizon filter is active.
+  /// Dated tasks pass when due on or before the cutoff (overdue tasks are
+  /// always kept — it is purely an upper bound).
   bool _matchesTimeScale(Task t) {
     final cutoff = _timeScaleCutoff();
     if (cutoff == null) return true;
     final due = t.dueDate;
-    if (due == null) return true;
+    if (due == null) return false;
     return !due.toLocal().isAfter(cutoff);
   }
 
