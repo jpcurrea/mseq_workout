@@ -68,6 +68,8 @@ class TaskApiService {
     int? parentTaskId,
     bool isRecurring = false,
     String? recurrenceRule,
+    int? recurrenceInterval,
+    String? recurrenceEndDate,
     bool? inheritSubtaskDuration,
     List<int> tagIds = const [],
   }) async {
@@ -83,6 +85,8 @@ class TaskApiService {
         if (parentTaskId != null) 'parent_task_id': parentTaskId,
         'is_recurring': isRecurring,
         if (recurrenceRule != null) 'recurrence_rule': recurrenceRule,
+        if (recurrenceInterval != null) 'recurrence_interval': recurrenceInterval,
+        if (recurrenceEndDate != null) 'recurrence_end_date': recurrenceEndDate,
         if (inheritSubtaskDuration != null)
           'inherit_subtask_duration': inheritSubtaskDuration,
         'tag_ids': tagIds,
@@ -142,6 +146,9 @@ class TaskApiService {
     int? parentTaskId,
     bool? isRecurring,
     String? recurrenceRule,
+    int? recurrenceInterval,
+    String? recurrenceEndDate,
+    bool clearRecurrenceEndDate = false,
     bool? inheritSubtaskDuration,
     List<int>? tagIds,
   }) async {
@@ -153,6 +160,12 @@ class TaskApiService {
     if (parentTaskId != null) body['parent_task_id'] = parentTaskId;
     if (isRecurring != null) body['is_recurring'] = isRecurring;
     if (recurrenceRule != null) body['recurrence_rule'] = recurrenceRule;
+    if (recurrenceInterval != null) body['recurrence_interval'] = recurrenceInterval;
+    if (clearRecurrenceEndDate) {
+      body['recurrence_end_date'] = '';
+    } else if (recurrenceEndDate != null) {
+      body['recurrence_end_date'] = recurrenceEndDate;
+    }
     if (inheritSubtaskDuration != null) {
       body['inherit_subtask_duration'] = inheritSubtaskDuration;
     }

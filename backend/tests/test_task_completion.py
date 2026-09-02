@@ -118,6 +118,57 @@ def test_recurring_daily_multiple_completions(db, user, project, task):
     assert task.is_completed is False
 
 
+# ── Recurrence interval + end date ────────────────────────────────────────────
+
+def test_recurring_interval_advances_multiple_days(db, user, project, task):
+    task.is_recurring = True
+    task.recurrence_rule = "DAILY"
+    task.recurrence_interval = 3
+    task.due_date = NOW
+    db.flush()
+    _mark_task_done(task, user.id, db, NOW, status="completed")
+    db.flush()
+    assert task.due_date == NOW + datetime.timedelta(days=3)
+    assert task.is_completed is False
+
+def test_recurring_weekly_interval_two(db, user, project, task):
+    task.is_recurring = True
+    task.recurrence_rule = "WEEKLY"
+    task.recurrence_interval = 2
+    task.due_date = NOW
+    db.flush()
+    _mark_task_done(task, user.id, db, NOW, status="completed")
+    db.flush()
+    assert task.due_date == NOW + datetime.timedelta(weeks=2)
+
+def test_recurring_stops_after_end_date(db, user, project, task):
+    task.is_recurring = True
+    task.recurrence_rule = "DAILY"
+    task.recurrence_interval = 1
+    task.due_date = NOW
+    # End date is today, so the next occurrence (tomorrow) is past the end.
+    task.recurrence_end_date = NOW
+    db.flush()
+    _mark_task_done(task, user.id, db, NOW, status="completed")
+    db.flush()
+    # Series is finished: task is closed rather than rescheduled.
+    assert task.is_completed is True
+    assert task.completed_at == NOW
+
+def test_recurring_continues_before_end_date(db, user, project, task):
+    task.is_recurring = True
+    task.recurrence_rule = "DAILY"
+    task.recurrence_interval = 1
+    task.due_date = NOW
+    # End date a week out: next occurrence (tomorrow) is still within range.
+    task.recurrence_end_date = NOW + datetime.timedelta(days=7)
+    db.flush()
+    _mark_task_done(task, user.id, db, NOW, status="completed")
+    db.flush()
+    assert task.is_completed is False
+    assert task.due_date == NOW + datetime.timedelta(days=1)
+
+
 # ── Recurring WEEKDAYS ────────────────────────────────────────────────────────
 
 def test_recurring_weekdays_friday_advances_to_monday(db, user, project, task):

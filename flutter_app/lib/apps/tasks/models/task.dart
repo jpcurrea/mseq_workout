@@ -35,6 +35,8 @@ class Task {
   final DateTime? completedAt;
   final bool isRecurring;
   final String? recurrenceRule;
+  final int recurrenceInterval;      // repeat every N units of the rule (>=1)
+  final DateTime? recurrenceEndDate; // series stops after this date (null = forever)
   final String recurrenceAdvanceMode;  // "now" | "stop"
   final List<Tag> tags;
   final List<Task> subtasks;
@@ -60,6 +62,8 @@ class Task {
     this.completedAt,
     required this.isRecurring,
     this.recurrenceRule,
+    this.recurrenceInterval = 1,
+    this.recurrenceEndDate,
     this.recurrenceAdvanceMode = 'now',
     required this.tags,
     required this.subtasks,
@@ -86,6 +90,10 @@ class Task {
         completedAt: json['completed_at'] != null ? DateTime.parse(json['completed_at']) : null,
         isRecurring: json['is_recurring'] ?? false,
         recurrenceRule: json['recurrence_rule'],
+        recurrenceInterval: (json['recurrence_interval'] as num?)?.toInt() ?? 1,
+        recurrenceEndDate: json['recurrence_end_date'] != null
+            ? DateTime.parse(json['recurrence_end_date'])
+            : null,
         recurrenceAdvanceMode: json['recurrence_advance_mode'] ?? 'now',
         tags: (json['tags'] as List? ?? []).map((t) => Tag.fromJson(t)).toList(),
         subtasks: (json['subtasks'] as List? ?? []).map((t) => Task.fromJson(t)).toList(),

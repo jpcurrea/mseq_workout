@@ -2,6 +2,7 @@
 Task management routes: tasks, tags, work sessions, plans, and analytics.
 """
 import datetime
+import calendar
 import csv
 import difflib
 import io
@@ -169,6 +170,8 @@ def _serialize_task(task: Task, now: datetime.datetime) -> Dict[str, Any]:
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         "is_recurring": task.is_recurring,
         "recurrence_rule": task.recurrence_rule,
+        "recurrence_interval": task.recurrence_interval or 1,
+        "recurrence_end_date": task.recurrence_end_date.isoformat() if task.recurrence_end_date else None,
         "recurrence_advance_mode": task.recurrence_advance_mode or "now",
         "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in task.tags],
         "subtasks": [_serialize_task(st, now) for st in task.subtasks],
@@ -199,38 +202,65 @@ def _load_task(task_id: int, user_id: int, session: Session) -> Task:
     return task
 
 
-def _next_due_date(due_date: datetime.datetime, rule: str) -> datetime.datetime:
+def _add_months(dt: datetime.datetime, months: int) -> datetime.datetime:
+    """Add ``months`` calendar months, clamping the day to the target month's
+    last valid day (e.g. Jan 31 + 1 month -> Feb 28/29)."""
+    month_index = dt.month - 1 + months
+    year = dt.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _add_years(dt: datetime.datetime, years: int) -> datetime.datetime:
+    """Add ``years`` calendar years, clamping Feb 29 to Feb 28 in non-leap years."""
+    year = dt.year + years
+    day = min(dt.day, calendar.monthrange(year, dt.month)[1])
+    return dt.replace(year=year, day=day)
+
+
+def _next_due_date(
+    due_date: datetime.datetime, rule: str, interval: int = 1
+) -> datetime.datetime:
+    """Return the next occurrence of ``due_date`` under ``rule``, repeating every
+    ``interval`` units (e.g. rule=WEEKLY, interval=2 -> +2 weeks). ``interval``
+    is clamped to a minimum of 1 and ignored for WEEKDAYS beyond skipping
+    weekends."""
     rule = rule.upper()
+    step = max(1, int(interval or 1))
     if rule == "DAILY":
-        return due_date + datetime.timedelta(days=1)
+        return due_date + datetime.timedelta(days=step)
     if rule == "WEEKDAYS":
-        # Advance by at least 1 day, then skip over Saturday (5) and Sunday (6)
-        next_dt = due_date + datetime.timedelta(days=1)
-        while next_dt.weekday() >= 5:
-            next_dt += datetime.timedelta(days=1)
+        # Advance ``step`` business days, skipping Saturday (5) and Sunday (6).
+        next_dt = due_date
+        for _ in range(step):
+            next_dt = next_dt + datetime.timedelta(days=1)
+            while next_dt.weekday() >= 5:
+                next_dt += datetime.timedelta(days=1)
         return next_dt
     if rule == "WEEKLY":
-        return due_date + datetime.timedelta(weeks=1)
+        return due_date + datetime.timedelta(weeks=step)
     if rule == "MONTHLY":
-        month = due_date.month + 1
-        year = due_date.year
-        if month > 12:
-            month, year = 1, year + 1
-        return due_date.replace(year=year, month=month)
-    return due_date + datetime.timedelta(days=1)
+        return _add_months(due_date, step)
+    if rule == "YEARLY":
+        return _add_years(due_date, step)
+    return due_date + datetime.timedelta(days=step)
 
 
 def _advance_due_date(
-    due_date: datetime.datetime, rule: str, target: datetime.datetime
+    due_date: datetime.datetime,
+    rule: str,
+    target: datetime.datetime,
+    interval: int = 1,
 ) -> datetime.datetime:
     """Advance ``due_date`` by whole recurrence intervals until it lands strictly
     after ``target``.  Always advances at least once (completing an occurrence
     must move the deadline forward), then skips over any iterations that fall on
     or before ``target``.  A guard caps the loop to avoid runaway iteration."""
-    nxt = _next_due_date(due_date, rule)
+    nxt = _next_due_date(due_date, rule, interval)
     guard = 0
     while nxt <= target and guard < 100000:
-        nxt = _next_due_date(nxt, rule)
+        nxt = _next_due_date(nxt, rule, interval)
         guard += 1
     return nxt
 
@@ -404,6 +434,8 @@ class TaskCreate(BaseModel):
     parent_task_id: Optional[int] = None
     is_recurring: bool = False
     recurrence_rule: Optional[str] = None
+    recurrence_interval: Optional[int] = None
+    recurrence_end_date: Optional[str] = None
     inherit_subtask_duration: Optional[bool] = None
     sort_order: Optional[float] = None
     tag_ids: List[int] = []
@@ -417,6 +449,8 @@ class TaskUpdate(BaseModel):
     parent_task_id: Optional[int] = None
     is_recurring: Optional[bool] = None
     recurrence_rule: Optional[str] = None
+    recurrence_interval: Optional[int] = None
+    recurrence_end_date: Optional[str] = None
     inherit_subtask_duration: Optional[bool] = None
     sort_order: Optional[float] = None
     tag_ids: Optional[List[int]] = None
@@ -1089,6 +1123,8 @@ class BatchUpdateBody(BaseModel):
     duration_minutes: Optional[int] = None
     is_recurring: Optional[bool] = None
     recurrence_rule: Optional[str] = None
+    recurrence_interval: Optional[int] = None
+    recurrence_end_date: Optional[str] = None
 
 
 class BatchCompleteBody(BaseModel):
@@ -1210,6 +1246,16 @@ async def batch_update_tasks(
         except ValueError:
             raise HTTPException(status_code=422, detail="due_date must be ISO datetime string")
 
+    new_recurrence_end: Optional[datetime.datetime] = None
+    if body.recurrence_end_date is not None:
+        try:
+            new_recurrence_end = (
+                datetime.datetime.fromisoformat(body.recurrence_end_date)
+                if body.recurrence_end_date else None
+            )
+        except ValueError:
+            raise HTTPException(status_code=422, detail="recurrence_end_date must be ISO datetime string")
+
     for task in tasks:
         if new_tags is not None:
             if body.tag_mode == "add":
@@ -1226,6 +1272,10 @@ async def batch_update_tasks(
             task.is_recurring = body.is_recurring
         if body.recurrence_rule is not None:
             task.recurrence_rule = body.recurrence_rule
+        if body.recurrence_interval is not None:
+            task.recurrence_interval = max(1, body.recurrence_interval)
+        if body.recurrence_end_date is not None:
+            task.recurrence_end_date = new_recurrence_end
         task.updated_at = now
 
     session.commit()
@@ -1292,6 +1342,13 @@ async def create_task(
         except ValueError:
             raise HTTPException(status_code=422, detail="due_date must be ISO datetime")
 
+    recurrence_end = None
+    if body.recurrence_end_date:
+        try:
+            recurrence_end = datetime.datetime.fromisoformat(body.recurrence_end_date)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="recurrence_end_date must be ISO datetime")
+
     if body.parent_task_id:
         parent = session.query(Task).filter(
             Task.id == body.parent_task_id, Task.project_id == body.project_id
@@ -1309,6 +1366,10 @@ async def create_task(
         parent_task_id=body.parent_task_id,
         is_recurring=body.is_recurring,
         recurrence_rule=body.recurrence_rule,
+        recurrence_interval=(
+            max(1, body.recurrence_interval) if body.recurrence_interval else 1
+        ),
+        recurrence_end_date=recurrence_end,
         inherit_subtask_duration=body.inherit_subtask_duration,
         sort_order=body.sort_order,
     )
@@ -1348,6 +1409,16 @@ async def update_task(
         task.is_recurring = body.is_recurring
     if body.recurrence_rule is not None:
         task.recurrence_rule = body.recurrence_rule
+    if body.recurrence_interval is not None:
+        task.recurrence_interval = max(1, body.recurrence_interval)
+    if body.recurrence_end_date is not None:
+        try:
+            task.recurrence_end_date = (
+                datetime.datetime.fromisoformat(body.recurrence_end_date)
+                if body.recurrence_end_date else None
+            )
+        except ValueError:
+            raise HTTPException(status_code=422, detail="recurrence_end_date must be ISO datetime")
     if body.inherit_subtask_duration is not None:
         task.inherit_subtask_duration = body.inherit_subtask_duration
     if body.sort_order is not None:
@@ -1476,15 +1547,27 @@ def _mark_task_done(
         # "now": skip every missed iteration up to the present moment.
         # "stop": advance to the first iteration after the selected stop time.
         target = now if mode == "now" else completion_time
-        # Reset the task in-place: advance the deadline and clear completion
-        # state so it reappears in the todo list.
-        task.due_date = _advance_due_date(task.due_date, task.recurrence_rule, target)
-        task.is_completed = False
-        task.completed_at = None
-        # Delete work sessions from the finished occurrence — their total is
-        # already captured in TaskCompletion.actual_minutes above.
-        for ws in list(task.work_sessions):
-            session.delete(ws)
+        next_due = _advance_due_date(
+            task.due_date, task.recurrence_rule, target, task.recurrence_interval or 1
+        )
+        # An optional end date terminates the series: once the next occurrence
+        # would fall after it, stop recurring and close the task for good.
+        if task.recurrence_end_date is not None and next_due > task.recurrence_end_date:
+            task.is_completed = True
+            task.completed_at = completion_time
+            for ws in list(task.work_sessions):
+                session.delete(ws)
+            _autocomplete_parent(task, user_id, session, now)
+        else:
+            # Reset the task in-place: advance the deadline and clear completion
+            # state so it reappears in the todo list.
+            task.due_date = next_due
+            task.is_completed = False
+            task.completed_at = None
+            # Delete work sessions from the finished occurrence — their total is
+            # already captured in TaskCompletion.actual_minutes above.
+            for ws in list(task.work_sessions):
+                session.delete(ws)
     else:
         task.is_completed = True
         task.completed_at = completion_time

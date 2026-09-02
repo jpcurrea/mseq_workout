@@ -12,7 +12,7 @@ June 2026 calendar reference (for weekday assertions):
 """
 import datetime
 import pytest
-from routers.tasks import _next_due_date
+from routers.tasks import _next_due_date, _advance_due_date
 
 MON, TUE, WED, THU, FRI, SAT, SUN = range(7)
 
@@ -118,3 +118,67 @@ def test_unknown_rule_defaults_to_daily():
     d = datetime.datetime(2026, 6, 16)
     assert _next_due_date(d, "BOGUS") == d + datetime.timedelta(days=1)
     assert _next_due_date(d, "") == d + datetime.timedelta(days=1)
+
+# ── YEARLY ────────────────────────────────────────────────────────────────────
+
+def test_yearly_advances_one_year():
+    d = datetime.datetime(2026, 6, 15)
+    result = _next_due_date(d, "YEARLY")
+    assert result == datetime.datetime(2027, 6, 15)
+
+def test_yearly_leap_day_clamps_to_feb_28():
+    d = datetime.datetime(2024, 2, 29)  # leap year
+    result = _next_due_date(d, "YEARLY")
+    assert result == datetime.datetime(2025, 2, 28)
+
+# ── Interval multiplier ───────────────────────────────────────────────────────
+
+def test_daily_interval_three():
+    d = datetime.datetime(2026, 6, 16)
+    assert _next_due_date(d, "DAILY", 3) == datetime.datetime(2026, 6, 19)
+
+def test_weekly_interval_two():
+    d = datetime.datetime(2026, 6, 16)  # Tuesday
+    result = _next_due_date(d, "WEEKLY", 2)
+    assert result == datetime.datetime(2026, 6, 30)
+    assert result.weekday() == TUE
+
+def test_monthly_interval_three():
+    d = datetime.datetime(2026, 6, 15)
+    result = _next_due_date(d, "MONTHLY", 3)
+    assert result == datetime.datetime(2026, 9, 15)
+
+def test_monthly_interval_clamps_day():
+    d = datetime.datetime(2026, 1, 31)
+    result = _next_due_date(d, "MONTHLY", 1)  # Feb has 28 days in 2026
+    assert result == datetime.datetime(2026, 2, 28)
+
+def test_yearly_interval_two():
+    d = datetime.datetime(2026, 6, 15)
+    assert _next_due_date(d, "YEARLY", 2) == datetime.datetime(2028, 6, 15)
+
+def test_interval_zero_or_none_treated_as_one():
+    d = datetime.datetime(2026, 6, 16)
+    assert _next_due_date(d, "DAILY", 0) == datetime.datetime(2026, 6, 17)
+    assert _next_due_date(d, "DAILY", None) == datetime.datetime(2026, 6, 17)
+
+def test_weekdays_interval_two_business_days():
+    monday = datetime.datetime(2026, 6, 15)  # Monday
+    result = _next_due_date(monday, "WEEKDAYS", 2)
+    assert result == datetime.datetime(2026, 6, 17)  # Wednesday
+
+def test_weekdays_interval_crosses_weekend():
+    thursday = datetime.datetime(2026, 6, 11)  # Thursday
+    result = _next_due_date(thursday, "WEEKDAYS", 2)
+    # +1 business day -> Fri, +1 more -> Monday (skips weekend)
+    assert result == datetime.datetime(2026, 6, 15)
+    assert result.weekday() == MON
+
+# ── _advance_due_date with interval ───────────────────────────────────────────
+
+def test_advance_due_date_respects_interval():
+    d = datetime.datetime(2026, 6, 1)
+    target = datetime.datetime(2026, 6, 10)
+    # every 3 days: 4, 7, 10, 13 -> first strictly after the 10th is the 13th
+    result = _advance_due_date(d, "DAILY", target, 3)
+    assert result == datetime.datetime(2026, 6, 13)

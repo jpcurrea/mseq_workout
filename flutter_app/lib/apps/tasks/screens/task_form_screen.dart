@@ -40,10 +40,13 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
   late final TextEditingController _descCtrl;
   late final TextEditingController _durationCtrl;
   late final TextEditingController _finalTaskCtrl;
+  late final TextEditingController _intervalCtrl;
 
   DateTime? _dueDate;
   bool _isRecurring = false;
   String? _recurrenceRule;
+  int _recurrenceInterval = 1;
+  DateTime? _recurrenceEndDate;
   bool _inheritDuration = false;
   List<Tag> _allTags = [];
   Set<int> _selectedTagIds = {};
@@ -74,6 +77,9 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
     _dueDate = t?.dueDate;
     _isRecurring = t?.isRecurring ?? false;
     _recurrenceRule = t?.recurrenceRule;
+    _recurrenceInterval = t?.recurrenceInterval ?? 1;
+    _recurrenceEndDate = t?.recurrenceEndDate;
+    _intervalCtrl = TextEditingController(text: _recurrenceInterval.toString());
     _inheritDuration = t?.inheritSubtaskDuration ?? false;
     _selectedTagIds = Set.from(t?.tags.map((tag) => tag.id) ?? []);
     _parentTaskId = t?.parentTaskId ?? widget.initialParentTaskId;
@@ -86,6 +92,7 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
     _descCtrl.dispose();
     _durationCtrl.dispose();
     _finalTaskCtrl.dispose();
+    _intervalCtrl.dispose();
     super.dispose();
   }
 
@@ -114,6 +121,37 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
     if (picked != null) setState(() => _dueDate = picked);
   }
 
+  /// Human label for a recurrence unit, pluralized by the current interval.
+  String _unitLabel(String rule) {
+    final plural = _recurrenceInterval > 1;
+    switch (rule) {
+      case 'DAILY':
+        return plural ? 'Days' : 'Day';
+      case 'WEEKLY':
+        return plural ? 'Weeks' : 'Week';
+      case 'MONTHLY':
+        return plural ? 'Months' : 'Month';
+      case 'YEARLY':
+        return plural ? 'Years' : 'Year';
+    }
+    return rule;
+  }
+
+  Future<void> _pickRecurrenceEndDate() async {
+    final base = _recurrenceEndDate ?? _dueDate ?? DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: base,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+    );
+    if (picked != null) {
+      // Use end-of-day so the final occurrence on that date is included.
+      setState(() => _recurrenceEndDate =
+          DateTime(picked.year, picked.month, picked.day, 23, 59, 59));
+    }
+  }
+
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _isSaving = true);
@@ -137,6 +175,10 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
           parentTaskId: _parentTaskId,
           isRecurring: _isRecurring,
           recurrenceRule: _isRecurring ? _recurrenceRule : null,
+          recurrenceInterval: _isRecurring ? _recurrenceInterval : null,
+          recurrenceEndDate:
+              _isRecurring ? _recurrenceEndDate?.toIso8601String() : null,
+          clearRecurrenceEndDate: !_isRecurring || _recurrenceEndDate == null,
           inheritSubtaskDuration: _hasSubtasks ? _inheritDuration : null,
           tagIds: _selectedTagIds.toList(),
         );
@@ -165,6 +207,9 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
           parentTaskId: _parentTaskId,
           isRecurring: _isRecurring,
           recurrenceRule: _isRecurring ? _recurrenceRule : null,
+          recurrenceInterval: _isRecurring ? _recurrenceInterval : null,
+          recurrenceEndDate:
+              _isRecurring ? _recurrenceEndDate?.toIso8601String() : null,
           tagIds: _selectedTagIds.toList(),
         );
         if (mounted) {
@@ -393,20 +438,89 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
             ),
             if (_isRecurring) ...[
               const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                value: _recurrenceRule,
-                decoration: const InputDecoration(
-                  labelText: 'Repeat',
-                  border: OutlineInputBorder(),
-                ),
-                items: const [
-                  DropdownMenuItem(value: 'DAILY', child: Text('Daily')),
-                  DropdownMenuItem(value: 'WEEKDAYS', child: Text('Every weekday (Mon–Fri)')),
-                  DropdownMenuItem(value: 'WEEKLY', child: Text('Weekly')),
-                  DropdownMenuItem(value: 'MONTHLY', child: Text('Monthly')),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_recurrenceRule != 'WEEKDAYS') ...[
+                    SizedBox(
+                      width: 88,
+                      child: TextFormField(
+                        controller: _intervalCtrl,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Every',
+                          border: OutlineInputBorder(),
+                        ),
+                        onChanged: (v) {
+                          final n = int.tryParse(v.trim());
+                          if (n != null && n > 0) {
+                            setState(() => _recurrenceInterval = n);
+                          }
+                        },
+                        validator: (v) {
+                          if (!_isRecurring || _recurrenceRule == 'WEEKDAYS') {
+                            return null;
+                          }
+                          final n = int.tryParse((v ?? '').trim());
+                          if (n == null || n < 1) return '≥ 1';
+                          return null;
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                  ],
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      value: _recurrenceRule,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Repeat',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        DropdownMenuItem(value: 'DAILY', child: Text(_unitLabel('DAILY'))),
+                        DropdownMenuItem(value: 'WEEKLY', child: Text(_unitLabel('WEEKLY'))),
+                        DropdownMenuItem(value: 'MONTHLY', child: Text(_unitLabel('MONTHLY'))),
+                        DropdownMenuItem(value: 'YEARLY', child: Text(_unitLabel('YEARLY'))),
+                        const DropdownMenuItem(
+                          value: 'WEEKDAYS',
+                          child: Text('Every weekday (Mon–Fri)'),
+                        ),
+                      ],
+                      onChanged: (v) => setState(() => _recurrenceRule = v),
+                      validator: (v) => (_isRecurring && v == null) ? 'Select a frequency' : null,
+                    ),
+                  ),
                 ],
-                onChanged: (v) => setState(() => _recurrenceRule = v),
-                validator: (v) => (_isRecurring && v == null) ? 'Select a frequency' : null,
+              ),
+              const SizedBox(height: 12),
+              InkWell(
+                onTap: _pickRecurrenceEndDate,
+                child: InputDecorator(
+                  decoration: const InputDecoration(
+                    labelText: 'End date (optional)',
+                    border: OutlineInputBorder(),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _recurrenceEndDate == null
+                              ? 'Never (repeat forever)'
+                              : DateFormat.yMMMd().format(_recurrenceEndDate!.toLocal()),
+                        ),
+                      ),
+                      if (_recurrenceEndDate != null)
+                        IconButton(
+                          icon: const Icon(Icons.clear, size: 18),
+                          tooltip: 'Clear end date',
+                          onPressed: () => setState(() => _recurrenceEndDate = null),
+                        )
+                      else
+                        const Icon(Icons.calendar_today, size: 18),
+                    ],
+                  ),
+                ),
               ),
             ],
             const SizedBox(height: 80), // FAB clearance

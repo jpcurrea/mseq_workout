@@ -214,7 +214,13 @@ class Task(Base):
     is_completed = Column(Boolean, nullable=False, default=False)
     completed_at = Column(DateTime, nullable=True)
     is_recurring = Column(Boolean, nullable=False, default=False)
-    recurrence_rule = Column(String, nullable=True)  # "DAILY" | "WEEKLY" | "MONTHLY"
+    recurrence_rule = Column(String, nullable=True)  # "DAILY" | "WEEKDAYS" | "WEEKLY" | "MONTHLY" | "YEARLY"
+    # Repeat every N units of the rule (e.g. rule=WEEKLY, interval=2 -> every
+    # 2 weeks). Defaults to 1. NULL is treated as 1 for legacy rows.
+    recurrence_interval = Column(Integer, nullable=True, default=1)
+    # Optional inclusive end date: once the next occurrence would fall after
+    # this date, the series stops recurring. NULL means repeat indefinitely.
+    recurrence_end_date = Column(DateTime, nullable=True)
     # When True (or NULL for legacy parents with subtasks), a parent task's
     # effective duration is the sum of its subtasks' durations; when False the
     # parent uses its own manually-set duration_minutes.
@@ -514,6 +520,8 @@ def init_db():
         "ALTER TABLE tasks ADD COLUMN recurrence_advance_mode TEXT",
         "ALTER TABLE tasks ADD COLUMN inherit_subtask_duration BOOLEAN",
         "ALTER TABLE tasks ADD COLUMN sort_order REAL",
+        "ALTER TABLE tasks ADD COLUMN recurrence_interval INTEGER DEFAULT 1",
+        "ALTER TABLE tasks ADD COLUMN recurrence_end_date DATETIME",
     ]
     with engine.connect() as conn:
         for stmt in _migrations:

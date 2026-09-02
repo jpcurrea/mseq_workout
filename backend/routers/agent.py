@@ -102,6 +102,149 @@ def _llm_runtime_config() -> tuple[str, str, Optional[str], float]:
     return base_url, model, api_key, timeout_sec
 
 
+def _is_reasoning_model(model: str) -> bool:
+    """Detect reasoning models (gpt-5.x, o-series, luna).
+
+    These models apply reasoning that is incompatible with function tools on
+    /v1/chat/completions, so we route them through /v1/responses to keep both
+    reasoning and tool-calling available.
+    """
+    name = (model or "").lower()
+    return name.startswith(("gpt-5", "o1", "o3", "o4")) or "luna" in name
+
+
+def _reasoning_effort() -> str:
+    """Configured reasoning effort for /v1/responses (minimal|low|medium|high)."""
+    effort = (_env_value("LLM_REASONING_EFFORT", "medium") or "medium").lower()
+    return effort if effort in {"minimal", "low", "medium", "high"} else "medium"
+
+
+def _chat_tools_to_responses(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten chat-completions tool schema into the Responses API shape.
+
+    Chat: {"type": "function", "function": {name, description, parameters}}
+    Responses: {"type": "function", name, description, parameters}
+    """
+    converted: List[Dict[str, Any]] = []
+    for tool in tools:
+        if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+            fn = tool["function"]
+            converted.append(
+                {
+                    "type": "function",
+                    "name": fn.get("name"),
+                    "description": fn.get("description"),
+                    "parameters": fn.get("parameters"),
+                }
+            )
+        else:
+            converted.append(tool)
+    return converted
+
+
+def _chat_content_to_responses(content: Any) -> Any:
+    """Convert chat content (string or parts) into Responses input content."""
+    if not isinstance(content, list):
+        return content
+    parts: List[Dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "text":
+            parts.append({"type": "input_text", "text": part.get("text", "")})
+        elif ptype == "image_url":
+            url = (part.get("image_url") or {}).get("url", "")
+            parts.append({"type": "input_image", "image_url": url})
+        else:
+            parts.append(part)
+    return parts
+
+
+def _chat_messages_to_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert chat-completions messages into a Responses API `input` array.
+
+    - assistant tool_calls  -> function_call items (matched by call_id)
+    - tool results          -> function_call_output items
+    - system/user/assistant -> role messages
+    """
+    items: List[Dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id"),
+                    "output": msg.get("content") or "",
+                }
+            )
+            continue
+        if role == "assistant" and msg.get("tool_calls"):
+            content = msg.get("content")
+            if content:
+                items.append({"role": "assistant", "content": content})
+            for call in msg["tool_calls"]:
+                fn = call.get("function", {})
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call.get("id"),
+                        "name": fn.get("name"),
+                        "arguments": fn.get("arguments") or "{}",
+                    }
+                )
+            continue
+        items.append({"role": role, "content": _chat_content_to_responses(msg.get("content"))})
+    return items
+
+
+def _build_responses_payload(
+    messages: List[Dict[str, Any]], model: str, tools: Optional[List[Dict[str, Any]]]
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": model,
+        "input": _chat_messages_to_responses_input(messages),
+        "reasoning": {"effort": _reasoning_effort()},
+    }
+    if tools:
+        payload["tools"] = _chat_tools_to_responses(tools)
+        payload["tool_choice"] = "auto"
+    return payload
+
+
+def _responses_to_chat_message(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a /v1/responses payload back into a chat-style assistant message."""
+    content_text = ""
+    tool_calls: List[Dict[str, Any]] = []
+    for item in data.get("output", []) or []:
+        itype = item.get("type")
+        if itype == "message":
+            for chunk in item.get("content", []) or []:
+                if chunk.get("type") == "output_text":
+                    content_text += chunk.get("text", "")
+        elif itype == "function_call":
+            tool_calls.append(
+                {
+                    "id": item.get("call_id") or item.get("id"),
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name"),
+                        "arguments": item.get("arguments") or "{}",
+                    },
+                }
+            )
+    message: Dict[str, Any] = {"role": "assistant", "content": content_text or None}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    usage = data.get("usage") or {}
+    message["_usage"] = {
+        "prompt_tokens": int(usage.get("input_tokens") or 0),
+        "completion_tokens": int(usage.get("output_tokens") or 0),
+    }
+    return message
+
+
 # ── Per-user BYO-key encryption (Fernet, derived from SECRET_KEY) ─────────────
 # NOTE: SECRET_KEY must be set as a stable env var in production. If it changes
 # (e.g. a random default on each restart), previously stored keys can no longer
@@ -496,9 +639,12 @@ _SITE_TOOL_GUIDE: Dict[str, str] = {
         "get_routine and execute its steps. You cannot edit or delete built-in (system) routines."
     ),
     "recurrence": (
-        "Recurring tasks use recurrence_rule: DAILY, WEEKDAYS (Mon-Fri), WEEKLY, or MONTHLY, with "
-        "is_recurring=true. To complete a recurring task so the next occurrence is scheduled, tell the "
-        "user to use the app's complete button — do not just set is_completed."
+        "Recurring tasks use recurrence_rule: DAILY, WEEKDAYS (Mon-Fri), WEEKLY, MONTHLY, or YEARLY, "
+        "with is_recurring=true. recurrence_interval repeats every N units of the rule (e.g. rule=WEEKLY, "
+        "interval=2 -> every 2 weeks; default 1). recurrence_end_date (ISO datetime) optionally stops the "
+        "series once the next occurrence would fall after it. To complete a recurring task so the next "
+        "occurrence is scheduled, tell the user to use the app's complete button — do not just set "
+        "is_completed."
     ),
     "rules": (
         "HARD RULES you must follow:\n"
@@ -979,9 +1125,19 @@ async def _call_llm_message(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    # Reasoning models (e.g. gpt-5.x / luna) can't combine reasoning with
+    # function tools on /v1/chat/completions, so route them through the
+    # /v1/responses endpoint which supports both simultaneously.
+    use_responses = _is_reasoning_model(model)
+    if use_responses:
+        url = f"{base_url.rstrip('/')}/responses"
+        payload = _build_responses_payload(messages, model, tools)
+    else:
+        url = f"{base_url.rstrip('/')}/chat/completions"
+
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
-            resp = await _llm_post(client, f"{base_url.rstrip('/')}/chat/completions", headers=headers, payload=payload)
+            resp = await _llm_post(client, url, headers=headers, payload=payload)
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=504,
@@ -997,6 +1153,8 @@ async def _call_llm_message(
         raise HTTPException(status_code=502, detail=f"LLM provider error: {resp.status_code} {detail}")
 
     data = resp.json()
+    if use_responses:
+        return _responses_to_chat_message(data)
     try:
         message = data["choices"][0]["message"]
     except Exception:
@@ -1118,7 +1276,9 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                         "duration_minutes": {"type": "integer"},
                         "parent_task_id": {"type": "integer"},
                         "is_recurring": {"type": "boolean"},
-                        "recurrence_rule": {"type": "string", "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY"]},
+                        "recurrence_rule": {"type": "string", "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY", "YEARLY"]},
+                        "recurrence_interval": {"type": "integer", "description": "Repeat every N units of the rule (default 1)."},
+                        "recurrence_end_date": {"type": "string", "description": "ISO datetime; series stops after this date."},
                         "tags": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -1143,7 +1303,9 @@ def _planning_tools_schema() -> List[Dict[str, Any]]:
                         "duration_minutes": {"type": "integer"},
                         "parent_task_id": {"type": "integer"},
                         "is_recurring": {"type": "boolean"},
-                        "recurrence_rule": {"type": "string", "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY"]},
+                        "recurrence_rule": {"type": "string", "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY", "YEARLY"]},
+                        "recurrence_interval": {"type": "integer", "description": "Repeat every N units of the rule (default 1)."},
+                        "recurrence_end_date": {"type": "string", "description": "ISO datetime; series stops after this date."},
                         "is_completed": {"type": "boolean"},
                         "tags": {
                             "type": "array",
@@ -1557,6 +1719,12 @@ def _execute_planning_tool_call(
             parent_task_id=args.get("parent_task_id"),
             is_recurring=bool(args.get("is_recurring", False)),
             recurrence_rule=args.get("recurrence_rule"),
+            recurrence_interval=(
+                max(1, int(args["recurrence_interval"]))
+                if isinstance(args.get("recurrence_interval"), int)
+                else 1
+            ),
+            recurrence_end_date=_parse_iso_datetime(args.get("recurrence_end_date")),
         )
 
         tag_ids = _ensure_tag_ids(
@@ -1603,6 +1771,10 @@ def _execute_planning_tool_call(
             task.is_recurring = bool(args.get("is_recurring"))
         if "recurrence_rule" in args:
             task.recurrence_rule = args.get("recurrence_rule")
+        if "recurrence_interval" in args and isinstance(args.get("recurrence_interval"), int):
+            task.recurrence_interval = max(1, int(args["recurrence_interval"]))
+        if "recurrence_end_date" in args:
+            task.recurrence_end_date = _parse_iso_datetime(args.get("recurrence_end_date"))
         if "is_completed" in args:
             is_completed = bool(args.get("is_completed"))
             task.is_completed = is_completed
@@ -1808,6 +1980,8 @@ def _execute_planning_tool_call(
                 "is_completed": t.is_completed,
                 "is_recurring": t.is_recurring,
                 "recurrence_rule": t.recurrence_rule,
+                "recurrence_interval": t.recurrence_interval or 1,
+                "recurrence_end_date": t.recurrence_end_date.isoformat() if t.recurrence_end_date else None,
                 "tags": [tg.name for tg in t.tags],
             })
         return {
@@ -1878,8 +2052,10 @@ def _todo_tools_schema() -> List[Dict[str, Any]]:
                         "is_recurring": {"type": "boolean"},
                         "recurrence_rule": {
                             "type": "string",
-                            "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY"],
+                            "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY", "YEARLY"],
                         },
+                        "recurrence_interval": {"type": "integer", "description": "Repeat every N units of the rule (default 1)."},
+                        "recurrence_end_date": {"type": "string", "description": "ISO datetime; series stops after this date."},
                         "tags": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["title"],
@@ -1902,8 +2078,10 @@ def _todo_tools_schema() -> List[Dict[str, Any]]:
                         "is_recurring": {"type": "boolean"},
                         "recurrence_rule": {
                             "type": "string",
-                            "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY"],
+                            "enum": ["DAILY", "WEEKDAYS", "WEEKLY", "MONTHLY", "YEARLY"],
                         },
+                        "recurrence_interval": {"type": "integer", "description": "Repeat every N units of the rule (default 1)."},
+                        "recurrence_end_date": {"type": "string", "description": "ISO datetime; series stops after this date."},
                         "is_completed": {"type": "boolean"},
                         "tags": {"type": "array", "items": {"type": "string"}},
                     },
