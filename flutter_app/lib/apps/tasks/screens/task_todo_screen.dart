@@ -9,7 +9,7 @@ import '../services/task_api_service.dart';
 import '../services/project_api_service.dart';
 import '../services/agent_api_service.dart';
 import '../widgets/task_list_view.dart';
-import '../widgets/agent_chat_panel.dart';
+import '../../../shared/widgets/agent_chat_panel.dart';
 import 'task_form_screen.dart';
 
 class TaskTodoScreen extends StatefulWidget {

@@ -23,6 +23,7 @@ from routers.tasks import tasks_router, plans_router
 from routers.budget import router as budget_router
 from routers.projects import router as projects_router
 from routers.agent import router as agent_router
+from routers.workout_agent import router as workout_agent_router
 
 # ── App factory ────────────────────────────────────────────────────────────────
 
@@ -57,6 +58,7 @@ app.include_router(plans_router)
 app.include_router(budget_router)
 app.include_router(projects_router)
 app.include_router(agent_router)
+app.include_router(workout_agent_router)
 
 # ── Startup ────────────────────────────────────────────────────────────────────
 

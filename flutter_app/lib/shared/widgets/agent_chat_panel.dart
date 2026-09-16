@@ -41,6 +41,9 @@ class AgentChatPanel extends StatefulWidget {
   final bool requiresApproval;
   /// Placeholder shown when the message list is empty.
   final String emptyStateHint;
+  /// When true the body expands to fill its parent (full-screen chat) instead of
+  /// using the fixed, drag-resizable height used by the docked panel.
+  final bool fillHeight;
 
   const AgentChatPanel({
     super.key,
@@ -57,6 +60,7 @@ class AgentChatPanel extends StatefulWidget {
     this.hasMemory = false,
     this.requiresApproval = false,
     this.emptyStateHint = 'Ask me anything about your tasks.',
+    this.fillHeight = false,
   });
 
   @override
@@ -193,10 +197,11 @@ class _AgentChatPanelState extends State<AgentChatPanel> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Column(
-      mainAxisSize: MainAxisSize.min,
+      mainAxisSize: widget.fillHeight ? MainAxisSize.max : MainAxisSize.min,
       children: [
         _buildHeader(theme),
-        if (widget.isExpanded) _buildBody(theme),
+        if (widget.isExpanded)
+          widget.fillHeight ? Expanded(child: _buildFilledBody(theme)) : _buildBody(theme),
       ],
     );
   }
@@ -274,12 +279,29 @@ class _AgentChatPanelState extends State<AgentChatPanel> {
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
             ),
-            Icon(
-              widget.isExpanded ? Icons.expand_more : Icons.expand_less,
-              size: 18,
-            ),
+            if (!widget.fillHeight)
+              Icon(
+                widget.isExpanded ? Icons.expand_more : Icons.expand_less,
+                size: 18,
+              ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Body variant for [AgentChatPanel.fillHeight] — no fixed height, no resize grip.
+  Widget _buildFilledBody(ThemeData theme) {
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        border: Border(top: BorderSide(color: theme.colorScheme.outlineVariant)),
+      ),
+      child: Column(
+        children: [
+          Expanded(child: _buildMessageList(theme)),
+          _buildInputRow(theme),
+        ],
       ),
     );
   }

@@ -240,6 +240,16 @@ class _WorkoutManagementScreenState extends State<WorkoutManagementScreen> {
       appBar: AppBar(
         title: const Text('Manage Workouts'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.psychology_alt_outlined),
+            tooltip: 'Ask your coach to build a routine',
+            onPressed: () async {
+              final changed = await Navigator.pushNamed(context, '/coach');
+              if (changed == true) loadWorkouts();
+            },
+          ),
+        ],
       ),
       body: _buildBody(),
     );

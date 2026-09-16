@@ -5,6 +5,7 @@ import 'apps/workout/screens/home_screen.dart';
 import 'apps/workout/screens/history_screen.dart';
 import 'apps/workout/screens/progress_screen.dart';
 import 'apps/workout/screens/workout_management_screen.dart';
+import 'apps/workout/screens/coach_screen.dart';
 import 'apps/tasks/screens/task_todo_screen.dart';
 import 'apps/tasks/screens/task_calendar_screen.dart';
 import 'apps/tasks/screens/task_gantt_screen.dart';
@@ -43,6 +44,7 @@ class LazyMaxxingApp extends StatelessWidget {
         '/history': (context) => const HistoryScreen(),
         '/progress': (context) => const ProgressScreen(),
         '/manage-workouts': (context) => const WorkoutManagementScreen(),
+        '/coach': (context) => const CoachScreen(),
         // Tasks sub-app
         '/tasks': (context) => const TaskTodoScreen(),
         '/tasks/calendar': (context) => const TaskCalendarScreen(),

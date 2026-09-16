@@ -338,7 +338,7 @@ def mseq(baseVal, powerVal, shift=1, whichSeq=1, raw=False):
                  [3,2],
                  [2,2],
                  [1,3]]
-        if powerVal==3:
+        elif powerVal==3:
             tap=[[0,2,3],
                  [4,1,2],
                  [3,0,2],
@@ -354,7 +354,7 @@ def mseq(baseVal, powerVal, shift=1, whichSeq=1, raw=False):
                  [1,0,2],
                  [1,4,3],
                  [1,1,3]]
-        if powerVal==4:
+        elif powerVal==4:
             tap=[[0,4,3,3],
                  [0,4,3,2],
                  [0,4,2,3],

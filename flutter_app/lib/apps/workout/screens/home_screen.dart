@@ -98,6 +98,14 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         actions: [
           IconButton(
+            icon: const Icon(Icons.psychology_alt_outlined),
+            tooltip: 'Talk to your coach',
+            onPressed: () async {
+              final changed = await Navigator.pushNamed(context, '/coach');
+              if (changed == true) loadWorkouts();
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.history),
             onPressed: () => Navigator.pushNamed(context, '/history'),
           ),
